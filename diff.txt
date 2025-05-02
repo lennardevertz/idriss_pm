@@ -1,0 +1,57 @@
+# Differences and TODOs
+
+# 1. Functional Differences
+
+1.1 Market Mechanism
+  - Onit contracts implement a Dynamic Parimutuel Market (DPM):
+    • Cost function C(q)=κ·√Σq² to mint/burn bucketed ERC1155 shares.
+    • Continuous outcome domain divided into fixed‐width buckets with bit‐packed storage.
+  - Planned system still leverages Onit’s DPM cost‐potential:
+    • Users stake ABC as a theoretical “cost” input C(q)=κ·√Σq².
+    • Invert cost function to mint ERC1155 shares proportional to stake.
+    • Compute confidence band (mean ± σ) on‐chain to classify in‐band vs out‐of‐band submissions.
+
+1.2 Asset & Position Model
+  - Onit: Bets in native ETH, positions represented by ERC1155 NFTs, protocol & creator fees in ETH.
+  - Planned: Global ERC20 (ABC) staking contract; no per‐market NFTs; stakes earn emissions; slashing & rewards in ABC.
+
+1.3 Oracle & Resolution
+  - Onit: Resolution via privileged resolver array (OnitMarketResolver), no optimistic oracle.
+  - Planned: Source submission & verification via UMA Optimistic Oracle; confidence settlement fully on‐chain.
+
+1.4 Phases & Timing
+  - Onit: Single betting window → resolution → dispute window → withdrawal delay.
+  - Planned: Phase 0 (source submission) + Phase 1 (confidence submission) run in parallel until topic close; immediate aggregation; no separate dispute window.
+
+1.5 Settlement & Incentives
+  - Onit: Winners share pot pro‐rata; losers get nothing; fixed protocol/creator commission.
+  - Planned: Out‐of‐band scores slashed at fixed bp; slashed tokens redistributed pro‐rata to in‐band stakers with time‐weighting; no market‐creator fee.
+
+1.6 Governance & Configurability
+  - Onit: Factory owner sets resolvers and commission rates.
+  - Planned: On‐chain governance for UMA bond/liveness, slashing %, emission rate; topics permissionless with per‐topic overrides.
+
+1.7 Data Structures & Dependencies
+  - Onit: Bit‐packed mappings, prb/math, Solady ERC1155 + LibClone, nested storage.
+  - Planned: Simple mappings topicId→Submission[], Submission struct {user, stake, score%, timestamp}, IOptimisticOracleV2, IERC20.
+
+# 2. Migration To-Do List
+
+- Adapt and integrate Onit DPM modules:
+   • Keep OnitInfiniteOutcomeDPMMechanism & OutcomeDomain for cost math and share tracking.
+   • Swap ETH payment flows to ABC.token.transferFrom and use stake as cost input.
+   • Remove only unused proxy/factory code if no longer needed.
+- Design & deploy new Topic + Submission structs/mappings.
+- Integrate UMA Optimistic Oracle (IOptimisticOracleV2):
+   • createTopic(..), submitSource(..) with bond & liveness defaults.
+- Build ABC staking contract:
+   • stake/unstake with 7-day cooldown, emission accrual, stake accounting.
+- Implement submitConfidence(topicId, score, stake):
+   • transferFrom ABC, record timestamp.
+- FinalizeTopic(topicId):
+   • compute weighted mean & σ, define band, apply slashing & reward logic.
+- Claim rewards/slashed funds:
+   • claimInBandRewards(), claimSlashedRebate(), manage claimed flags.
+- Add governance (Ownable/AccessControl) for global & per-topic params.
+- Emit events & view functions for phases, timeRemaining, submissions, aggregates.
+- Write comprehensive unit tests & perform gas/security audits.
