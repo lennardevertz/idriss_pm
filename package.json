@@ -11,5 +11,9 @@
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox-viem": "^3.0.0",
     "hardhat": "^2.23.0"
+  },
+  "dependencies": {
+    "@prb/math": "^4.1.0",
+    "solady": "^0.1.17"
   }
 }
