@@ -1,11 +1,13 @@
 System: Confidence-Based Prediction Market with UMA-Verified Sources
 
 Overview
-This system enables users to submit a source (e.g. article, dataset) and 
-submit confidence levels about its trustworthiness or validity. 
-Confidence scores are aggregated, and participants are rewarded or penalized 
-based on how close their submission is to the consensus. 
-To submit a score, the user needs to stake a an ERC20 token ABC.
+This system enables anyone to spin up a topic (identified by a URL or unique string)
+and submit sources (e.g. articles, datasets, tweets, images) about that topic via UMA’s
+optimistic oracle. Concurrently, users stake an ERC20 token ABC in a confidence submission window
+to submit real-time confidence scores on-chain.
+At topic close, the contract aggregates all confidence scores into a mean ± σ band
+and immediately rewards or slashes participants based on whether their scores fall inside
+or outside that band.
 
 Actors
 
@@ -16,15 +18,21 @@ Actors
 
 Flow:
 
-1. Submit Source:
-   - User asserts a source using UMA’s optimistic oracle.
-   - UMA validates the source or allows a dispute window.
-   - On finality, the source is accepted or rejected.
+1. Topics & Phase 0 (Source Submission):
+   - Anyone can create a topic. Anyone can submit a source to that topic via UMA’s
+     optimistic oracle (using default bond size & liveness from UMA).
+   - Phase 0 runs for the full topic duration. All assertions (including disputed ones)
+     are visible on-chain in real time.
 
-2. Submit Confidence:
-   - Users submit a single confidence % (or range).
-   - Users stake token ABC along with their confidence.
-   - Each submission is timestamped.
+2. Phase 1 (Confidence Submission):
+   - Runs concurrently with Phase 0. Users stake ABC and submit a confidence score (%).
+   - Each submission is timestamped on-chain for weighting.
+
+3. Phase 2 & 3 (Aggregation & Settlement):
+   - At topic end, the contract computes mean and σ over all valid scores.
+   - Users inside the band earn a pro-rata share of slashed stakes (based on stake size & submission time).
+   - Users outside the band are slashed by a fixed %.
+   - Settlement is performed on-chain; no UMA DVM or OO calls are needed beyond source visibility.
 
 3. Aggregation (post-deadline):
    - Once the submission window ends:
@@ -39,7 +47,20 @@ Flow:
 
 Key Mechanics
 
-    - UMA is only used for initial source verification.
+    - UMA is only used for source collection via the optimistic oracle. The confidence
+      market (aggregation & settlement) is fully on-chain and does not call the DVM or OO.
+    - Users must stake ABC in a global staking contract (same model as UMA DVM 2.0). While actively staked:
+      • They may submit confidence scores on any topic.
+      • Stakes earn pro-rata emissions per block (rate set by governance).
+      • Stakes are slashed (~0.1% per missed or out-of-band submission) and those slashed tokens
+        are immediately redistributed to in-band stakers, pro-rata by stake size & submission timestamp.
+      • Initiating an unstake triggers a 7-day cooldown during which that stake cannot submit scores or be withdrawn.
+    - The contract emits view functions per topic: current phase, time remaining, submissions, and aggregates.
     - All confidence data is handled by the smart contract.
     - Confidence scores are aggregated automatically on-chain.
     - Rewards discourage last-minute band-chasing by weighting earlier inputs more.
+
+Governance & parameter configurability
+    - Global governance sets protocol-wide defaults (e.g. UMA bond size, slashing %, emission rate).
+    - Each topic creator can override per-topic parameters (e.g. topic duration).
+    - All topics are fully decentralized: anyone may spawn a new topic with custom settings.
