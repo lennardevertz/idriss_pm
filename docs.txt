@@ -1,0 +1,45 @@
+System: Confidence-Based Prediction Market with UMA-Verified Sources
+
+Overview
+This system enables users to submit a source (e.g. article, dataset) and 
+submit confidence levels about its trustworthiness or validity. 
+Confidence scores are aggregated, and participants are rewarded or penalized 
+based on how close their submission is to the consensus. 
+To submit a score, the user needs to stake a an ERC20 token ABC.
+
+Actors
+
+    - User: Submits source and confidence levels.
+    - UMA Oracle: Verifies whether the submitted source exists (via an optimistic assertion).
+    - Smart Contract: Handles confidence submissions, calculates statistics, and performs payouts/slashing.
+    - System Backend: Handles auxiliary logic like submission timestamps and confidence weighting.
+
+Flow:
+
+1. Submit Source:
+   - User asserts a source using UMA’s optimistic oracle.
+   - UMA validates the source or allows a dispute window.
+   - On finality, the source is accepted or rejected.
+
+2. Submit Confidence:
+   - Users submit a single confidence % (or range).
+   - Users stake token ABC along with their confidence.
+   - Each submission is timestamped.
+
+3. Aggregation (post-deadline):
+   - Once the submission window ends:
+     - Compute mean and standard deviation of all valid confidence scores.
+     - Earlier submissions may be weighted more.
+     - Define a “confidence band” (e.g. ±1σ around mean).
+
+4. Payout & Slashing:
+   - Users inside the band are rewarded in token ABC proportionally to their stake.
+   - Users outside the band are slashed (e.g. 0.05%) from their staked ABC tokens.
+   - Rewards and slashing are applied based on position and stake as well as time of submission.
+
+Key Mechanics
+
+    - UMA is only used for initial source verification.
+    - All confidence data is handled by the smart contract.
+    - Confidence scores are aggregated automatically on-chain.
+    - Rewards discourage last-minute band-chasing by weighting earlier inputs more.
