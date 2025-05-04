@@ -2,7 +2,6 @@
 pragma solidity ^0.8.28;
 
 import {convert, convert, div, mul} from "@prb/math/src/SD59x18.sol";
-import {ERC1155} from "solady/src/tokens/ERC1155.sol";
 
 import {LibString} from "./utils/LibString.sol";
 
@@ -22,8 +21,7 @@ import {OnitMarketResolver} from "./resolvers/OnitMarketResolver.sol";
  */
 contract OnitInfiniteOutcomeDPM is
     OnitInfiniteOutcomeDPMMechanism,
-    OnitMarketResolver,
-    ERC1155
+    OnitMarketResolver
 {
     // ----------------------------------------------------------------
     // Errors
@@ -79,7 +77,7 @@ contract OnitInfiniteOutcomeDPM is
     // ----------------------------------------------------------------
 
     /**
-     * TraderStake is the amount they have put into the market, and the NFT they were minted in return
+     * TraderStake is the amount they have put into the market
      * Traders can:
      * - Sell their position and leave the market (which makes sense if the traders position is worth more than their
      * stake)
@@ -89,14 +87,11 @@ contract OnitInfiniteOutcomeDPM is
      */
     struct TraderStake {
         uint256 totalStake;
-        uint256 nftId;
     }
 
-    // Total amount the trader has bet across all predictions and their NFT
+    // Total amount the trader has bet across all predictions
     mapping(address trader => TraderStake stake) public tradersStake;
 
-    /// Each predictor get 1 NFT per market, this variable tracks what tokenId that should be
-    uint256 public nextNftTokenId;
     /// Timestamp after which no more bets can be placed (0 = no cutoff)
     uint256 public bettingCutoff;
     /// Total payout pool when the market is resolved
@@ -119,8 +114,6 @@ contract OnitInfiniteOutcomeDPM is
     string public symbol = "ONIT";
     /// The question traders are predicting
     string public marketQuestion;
-    /// ERC1155 token uri
-    string private _uri = "https://onit.fun/";
 
     /// Protocol commission rate in basis points of 10000 (400 = 4%)
     uint256 public constant PROTOCOL_COMMISSION_BP = 400;
@@ -221,8 +214,6 @@ contract OnitInfiniteOutcomeDPM is
 
         // Set market description
         marketQuestion = initData.config.marketQuestion;
-        // Set ERC1155 token uri
-        _uri = initData.config.marketUri;
         // Set time limit for betting
         bettingCutoff = initData.config.bettingCutoff;
         // Set market creator
@@ -230,16 +221,10 @@ contract OnitInfiniteOutcomeDPM is
         // Set market creator commission rate
         marketCreatorCommissionBp = initData.config.marketCreatorCommissionBp;
 
-        // Mint the trader a prediction NFT
-        _mint(initData.initiator, nextNftTokenId, 1, "");
         // Update the traders stake
         tradersStake[initData.initiator] = TraderStake({
-            totalStake: initialBetValue,
-            nftId: nextNftTokenId
+            totalStake: initialBetValue
         });
-
-        // Update the prediction count for the next trader
-        nextNftTokenId++;
 
         emit MarketInitialized(initData.initiator, msg.value);
     }
@@ -385,17 +370,6 @@ contract OnitInfiniteOutcomeDPM is
         if (!success) revert TransferFailed();
     }
 
-    /**
-     * @notice Set the URI for the market ERC1155 token
-     *
-     * @param newUri The new URI
-     */
-    function setUri(string memory newUri) external onlyOnitFactoryOwner {
-        _uri = newUri;
-
-        emit URI(newUri, 0);
-    }
-
     // ----------------------------------------------------------------
     // Public market functions
     // ----------------------------------------------------------------
@@ -440,11 +414,6 @@ contract OnitInfiniteOutcomeDPM is
         // Update the markets outcome token holdings
         _updateHoldings(msg.sender, bucketIds, shares);
 
-        // If the trader does not already have a stake, create one and mint them an NFT
-        if (tradersStake[msg.sender].totalStake == 0) {
-            _mint(msg.sender, nextNftTokenId, 1, "");
-            tradersStake[msg.sender].nftId = nextNftTokenId++;
-        }
         // Update the traders total stake
         tradersStake[msg.sender].totalStake += msg.value;
 
@@ -496,10 +465,8 @@ contract OnitInfiniteOutcomeDPM is
         // Set new market values
         totalQSquared = newTotalQSquared;
 
-        // Trader sells position, so we burn their NFT and set their stake to 0
+        // Trader sells position, set their stake to 0
         tradersStake[msg.sender].totalStake = 0;
-        tradersStake[msg.sender].nftId = 0;
-        _burn(msg.sender, tradersStake[msg.sender].nftId, 1);
 
         // Transfer the trader's payout
         // We use -costDiff as the payout is the difference in cost between the trader's prediction and the existing
@@ -541,10 +508,6 @@ contract OnitInfiniteOutcomeDPM is
         tradersStake[trader].totalStake = 0;
 
         if (totalRepayment == 0) revert NothingToPay();
-
-        // Burn the trader's NFT and remove it from stake
-        _burn(trader, tradersStake[trader].nftId, 1);
-        tradersStake[trader].nftId = 0;
 
         (bool success, ) = trader.call{value: totalRepayment}("");
         if (!success) revert TransferFailed();
@@ -591,16 +554,6 @@ contract OnitInfiniteOutcomeDPM is
                         .div(convert(totalBucketShares))
                 )
             );
-    }
-
-    // ----------------------------------------------------------------
-    // ERC1155 functions
-    // ----------------------------------------------------------------
-
-    function uri(
-        uint256 id
-    ) public view virtual override returns (string memory) {
-        return LibString.concat(_uri, LibString.toString(id));
     }
 
     // ----------------------------------------------------------------
