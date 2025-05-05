@@ -95,6 +95,9 @@ contract OnitInfiniteOutcomeDPM is
     /// @notice Amount of ABC‐stake each address has committed to this market
     mapping(address => uint256) public committedStake;
 
+    address[] public allVoters;
+    mapping(address => bool) public hasVoted;
+
     // Total amount the trader has bet across all predictions
     mapping(address trader => TraderStake stake) public tradersStake;
 
@@ -172,8 +175,9 @@ contract OnitInfiniteOutcomeDPM is
     constructor(
         address _abcToken,
         uint128 _emissionRate,
-        _unstakeCollDown
-    ) Staker(_emissionRate, _unstakeCollDown, _abcToken) {
+        uint64 _unstakeCollDown,
+        address _operator
+    ) Staker(_emissionRate, _unstakeCollDown, _abcToken, _operator) {
         // Used as flag to prevent implementation from being initialized, and to prevent bets
         marketVoided = true;
     }
@@ -423,7 +427,12 @@ contract OnitInfiniteOutcomeDPM is
         uint256 freeStake = voterStakes[msg.sender].stake -
             committedStake[msg.sender];
         require(voteAmt <= freeStake, "Insufficient stake power");
-        ommittedStake[msg.sender] += voteAmt;
+        committedStake[msg.sender] += voteAmt;
+
+        if (!hasVoted[msg.sender]) {
+            hasVoted[msg.sender] = true;
+            allVoters.push(msg.sender);
+        }
 
         // Track the latest totalQSquared so we don't need to recalculate it
         totalQSquared = newTotalQSquared;
@@ -512,5 +521,18 @@ contract OnitInfiniteOutcomeDPM is
                         .div(convert(totalBucketShares))
                 )
             );
+    }
+
+    function _updateTrackers(address voter) internal override {
+        // Apply any pending slash first
+        VoterStake storage vs = voterStakes[voter];
+        int128 toSlash = vs.unappliedSlash;
+        if (toSlash > 0) {
+            // remove from their stake
+            vs.stake -= uint128(toSlash);
+            vs.unappliedSlash = 0;
+        }
+        // Then proceed with reward logic
+        super._updateTrackers(voter);
     }
 }

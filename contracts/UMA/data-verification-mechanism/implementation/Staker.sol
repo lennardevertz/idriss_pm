@@ -4,17 +4,14 @@ pragma solidity ^0.8.0;
 import "../../common/implementation/Lockable.sol";
 import "../../common/implementation/MultiCaller.sol";
 
-import "../interfaces/StakerInterface.sol";
-
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 /**
  * @title Staking contract enabling UMA to be locked up by stakers to earn a pro rata share of a fixed emission rate.
  * @dev Handles the staking, unstaking and reward retrieval logic.
  */
-abstract contract Staker is StakerInterface, Ownable, Lockable, MultiCaller {
+abstract contract Staker is Ownable, Lockable, MultiCaller {
     /****************************************
      *             STAKING STATE            *
      ****************************************/
@@ -46,7 +43,9 @@ abstract contract Staker is StakerInterface, Ownable, Lockable, MultiCaller {
 
     uint64 public lastUpdateTime; // Tracks the last time the reward rate was updated, used in reward allocation.
 
-    IERC20 public immutable stakingToken; // An instance of the UMA voting token to mint rewards for stakers
+    IERC20 public immutable votingToken; // An instance of the UMA voting token to mint rewards for stakers
+
+    address OPERATOR; // Multisig holding the reward token
 
     /****************************************
      *                EVENTS                *
@@ -103,11 +102,13 @@ abstract contract Staker is StakerInterface, Ownable, Lockable, MultiCaller {
     constructor(
         uint128 _emissionRate,
         uint64 _unstakeCoolDown,
-        address _votingToken
+        address _votingToken,
+        address _operator
     ) {
         setEmissionRate(_emissionRate);
         setUnstakeCoolDown(_unstakeCoolDown);
         votingToken = IERC20(_votingToken);
+        OPERATOR = _operator;
     }
 
     /****************************************
@@ -246,8 +247,8 @@ abstract contract Staker is StakerInterface, Ownable, Lockable, MultiCaller {
             voterStake.outstandingRewards = 0;
             require(
                 // ToDo: change from mint to "take from some treasury balance"
-                // votingToken.transferFrom(OPERATOR, recipient, tokensToMint),
-                votingToken.mint(recipient, tokensToMint),
+                votingToken.transferFrom(OPERATOR, recipient, tokensToMint),
+                // votingToken.mint(recipient, tokensToMint),
                 "Voting token issuance failed"
             );
             emit WithdrawnRewards(voter, msg.sender, tokensToMint);
