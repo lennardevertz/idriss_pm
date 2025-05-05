@@ -3,8 +3,6 @@ pragma solidity ^0.8.28;
 
 import {convert, convert, div, mul} from "@prb/math/src/SD59x18.sol";
 
-import {LibString} from "./utils/LibString.sol";
-
 import {OnitInfiniteOutcomeDPMMechanism} from "./mechanisms/infinite-outcome-DPM/OnitInfiniteOutcomeDPMMechanism.sol";
 import {OnitMarketResolver} from "./resolvers/OnitMarketResolver.sol";
 
