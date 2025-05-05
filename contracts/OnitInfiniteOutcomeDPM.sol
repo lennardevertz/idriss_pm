@@ -6,6 +6,10 @@ import {convert, convert, div, mul} from "@prb/math/src/SD59x18.sol";
 import {OnitInfiniteOutcomeDPMMechanism} from "./mechanisms/infinite-outcome-DPM/OnitInfiniteOutcomeDPMMechanism.sol";
 import {OnitMarketResolver} from "./resolvers/OnitMarketResolver.sol";
 
+import "./UMA/common/implementation/Lockable.sol";
+import "./UMA/common/implementation/MultiCaller.sol";
+import "./UMA/data-verification-mechanism/implementation/Staker.sol";
+
 /**
  * @title Onit Infinite Outcome Dynamic Parimutual Market
  *
@@ -19,7 +23,8 @@ import {OnitMarketResolver} from "./resolvers/OnitMarketResolver.sol";
  */
 contract OnitInfiniteOutcomeDPM is
     OnitInfiniteOutcomeDPMMechanism,
-    OnitMarketResolver
+    OnitMarketResolver,
+    Staker
 {
     // ----------------------------------------------------------------
     // Errors
@@ -86,6 +91,9 @@ contract OnitInfiniteOutcomeDPM is
     struct TraderStake {
         uint256 totalStake;
     }
+
+    /// @notice Amount of ABC‐stake each address has committed to this market
+    mapping(address => uint256) public committedStake;
 
     // Total amount the trader has bet across all predictions
     mapping(address trader => TraderStake stake) public tradersStake;
@@ -161,7 +169,11 @@ contract OnitInfiniteOutcomeDPM is
      *
      * @dev Initialize owner to a dummy address to prevent implementation from being initialized
      */
-    constructor() {
+    constructor(
+        address _abcToken,
+        uint128 _emissionRate,
+        _unstakeCollDown
+    ) Staker(_emissionRate, _unstakeCollDown, _abcToken) {
         // Used as flag to prevent implementation from being initialized, and to prevent bets
         marketVoided = true;
     }
@@ -389,6 +401,7 @@ contract OnitInfiniteOutcomeDPM is
             revert BettingCutoffPassed();
         if (resolvedAtTimestamp != 0) revert MarketIsResolved();
         if (marketVoided) revert MarketIsVoided();
+        //  remove msg.value dependency?
         if (msg.value < MIN_BET_SIZE || msg.value > MAX_BET_SIZE)
             revert BetValueOutOfBounds();
 
@@ -404,8 +417,13 @@ contract OnitInfiniteOutcomeDPM is
          * uint256 would result in a number larger than they would ever need to send, so the casting is safe for this
          * check
          */
-        if (msg.value != uint256(costDiff))
-            revert IncorrectBetValue(costDiff, msg.value);
+        //   Add check if staked amount is bigger (equal to) the costDiff?
+        require(costDiff > 0, "Cost must be positive");
+        uint256 voteAmt = uint256(costDiff);
+        uint256 freeStake = voterStakes[msg.sender].stake -
+            committedStake[msg.sender];
+        require(voteAmt <= freeStake, "Insufficient stake power");
+        ommittedStake[msg.sender] += voteAmt;
 
         // Track the latest totalQSquared so we don't need to recalculate it
         totalQSquared = newTotalQSquared;
@@ -413,67 +431,9 @@ contract OnitInfiniteOutcomeDPM is
         _updateHoldings(msg.sender, bucketIds, shares);
 
         // Update the traders total stake
-        tradersStake[msg.sender].totalStake += msg.value;
+        tradersStake[msg.sender].totalStake += voteAmt;
 
         emit BoughtShares(msg.sender, costDiff, newTotalQSquared);
-    }
-
-    /**
-     * @notice Sell a set of shares
-     *
-     * @dev Burn the trader's outcome tokens in the buckets they want to sell in exchange for their market value
-     * This corresponds to the difference in the cost function between where the market is, and where it will be after
-     * they burn their shares
-     * NOTE:
-     * - This forfeits the trader's stake, so they should be sure they are selling for a profit
-     *
-     * @param bucketIds The bucket IDs for the trader's prediction
-     * @param shares The shares for the trader's prediction
-     */
-    function sellShares(
-        int256[] memory bucketIds,
-        int256[] memory shares
-    ) external {
-        if (tradersStake[msg.sender].totalStake == 0) revert NothingToPay();
-        if (resolvedAtTimestamp != 0) revert MarketIsResolved();
-        if (marketVoided) revert MarketIsVoided();
-
-        /**
-         * We only allow negative share changes, so if any shares are positive, revert
-         * This is because we don't want to allow traders to increase their position using this function
-         * The function is not payable and we don't check they have provided enough funds to cover the cost of the
-         * increase
-         * TODO: move this to the calculateCostOfTrade function to avoid extra loop
-         */
-        for (uint256 i; i < shares.length; i++) {
-            if (shares[i] > 0) revert InvalidSharesValue();
-        }
-
-        (int256 costDiff, int256 newTotalQSquared) = calculateCostOfTrade(
-            bucketIds,
-            shares
-        );
-
-        // If the cost difference is positive, revert
-        // Otherwise this would mean they need to pay to sell their position
-        if (costDiff > 0) revert NothingToPay();
-
-        _updateHoldings(msg.sender, bucketIds, shares);
-
-        // Set new market values
-        totalQSquared = newTotalQSquared;
-
-        // Trader sells position, set their stake to 0
-        tradersStake[msg.sender].totalStake = 0;
-
-        // Transfer the trader's payout
-        // We use -costDiff as the payout is the difference in cost between the trader's prediction and the existing
-        // cost. We know this is negative as we checked for that above, so negating it will give a positive value which
-        // corrosponds to how much the market should pay the trader
-        (bool success, ) = msg.sender.call{value: uint256(-costDiff)}("");
-        if (!success) revert TransferFailed();
-
-        emit SoldShares(msg.sender, costDiff, newTotalQSquared);
     }
 
     function collectPayout(address trader) external {
@@ -552,27 +512,5 @@ contract OnitInfiniteOutcomeDPM is
                         .div(convert(totalBucketShares))
                 )
             );
-    }
-
-    // ----------------------------------------------------------------
-    // Fallback functions
-    // ----------------------------------------------------------------
-
-    // TODO add functions for accepting or rejecting tokens when we move away from native payments
-
-    /**
-     * @dev Reject any funds sent to the contract
-     * - We dont't want funds not accounted for in the market to effect the expected outcome for traders
-     */
-    fallback() external payable {
-        revert RejectFunds();
-    }
-
-    /**
-     * @dev Reject any funds sent to the contract
-     * - We dont't want funds not accounted for in the market to effect the expected outcome for traders
-     */
-    receive() external payable {
-        revert RejectFunds();
     }
 }
