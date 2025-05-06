@@ -88,6 +88,9 @@ contract OnitInfiniteOutcomeDPM is
     }
 
     // Total amount the trader has bet across all predictions
+    mapping(address trader => uint256) public votingPower;
+
+    // Total amount the trader has bet across all predictions
     mapping(address trader => TraderStake stake) public tradersStake;
 
     /// Timestamp after which no more bets can be placed (0 = no cutoff)
@@ -106,10 +109,6 @@ contract OnitInfiniteOutcomeDPM is
     /// The market creator fee, set at market close
     uint256 public marketCreatorFee;
 
-    /// The name of the market
-    string public name = "Onit Prediction Market";
-    /// The symbol of the market
-    string public symbol = "ONIT";
     /// The question traders are predicting
     string public marketQuestion;
 
@@ -118,11 +117,13 @@ contract OnitInfiniteOutcomeDPM is
     /// Maximum market creator commission rate (4%)
     uint256 public constant MAX_MARKET_CREATOR_COMMISSION_BP = 400;
     /// The minimum bet size
-    uint256 public constant MIN_BET_SIZE = 0.0001 ether;
+    uint256 public constant MIN_BET_SIZE = 1 ether;
     /// The maximum bet size
-    uint256 public constant MAX_BET_SIZE = 1 ether;
+    uint256 public constant MAX_BET_SIZE = 1_000_000 ether;
     /// The version of the market
     string public constant VERSION = "0.0.2";
+
+    address votinContractAddress;
 
     /// Market configuration params passed to initialize the market
     struct MarketConfig {
@@ -230,6 +231,15 @@ contract OnitInfiniteOutcomeDPM is
     // ----------------------------------------------------------------
     // Admin functions
     // ----------------------------------------------------------------
+
+    /// @notice initialize the voting contract address
+    function initializeVotinContract(
+        address newVotinContractAddress
+    ) external onlyResolver {
+        require(newVotinContractAddress != address(0), "Zero address");
+        require(votinContractAddress == address(0), "Already initialized");
+        votinContractAddress = newVotinContractAddress;
+    }
 
     /**
      * @notice Set the resolved outcome, closing the market
@@ -375,22 +385,23 @@ contract OnitInfiniteOutcomeDPM is
     /**
      * @notice Buy shares in the market for a given outcomes
      *
-     * @dev Trader specifies the outcome outcome tokens they want exposure to, and if they provided a sufficent value we
-     * mint them
+     * @dev Voter specifies the outcome outcome tokens they want exposure to
      *
-     * @param bucketIds The bucket IDs for the trader's prediction
-     * @param shares The shares for the trader's prediction
+     * @param bucketIds The bucket IDs for the voter's prediction
+     * @param shares The shares for the voter's prediction
      */
-    function buyShares(
+    function vote(
         int256[] memory bucketIds,
         int256[] memory shares
-    ) external payable {
+    ) external onlyVotingContract {
         if (bettingCutoff != 0 && block.timestamp > bettingCutoff)
             revert BettingCutoffPassed();
         if (resolvedAtTimestamp != 0) revert MarketIsResolved();
         if (marketVoided) revert MarketIsVoided();
-        if (msg.value < MIN_BET_SIZE || msg.value > MAX_BET_SIZE)
-            revert BetValueOutOfBounds();
+        if (
+            votingPower[msg.sender] < MIN_BET_SIZE ||
+            votingPower[msg.sender] > MAX_BET_SIZE
+        ) revert BetValueOutOfBounds();
 
         // Calculate shares for each bucket
         (int256 costDiff, int256 newTotalQSquared) = calculateCostOfTrade(
@@ -399,90 +410,32 @@ contract OnitInfiniteOutcomeDPM is
         );
 
         /**
-         * If the trader has not sent the exact amount to cover the cost of the bet, revert.
-         * costDiff may be negative, but we know the msg.value is positive and that casting a negative number to
+         * If the voter has not sent the exact amount to cover the cost of the bet, revert.
+         * costDiff may be negative, but we know the votingPower[msg.sender] is positive and that casting a negative number to
          * uint256 would result in a number larger than they would ever need to send, so the casting is safe for this
          * check
          */
-        if (msg.value != uint256(costDiff))
-            revert IncorrectBetValue(costDiff, msg.value);
+        if (votingPower[msg.sender] != uint256(costDiff))
+            revert IncorrectBetValue(costDiff, votingPower[msg.sender]);
 
         // Track the latest totalQSquared so we don't need to recalculate it
         totalQSquared = newTotalQSquared;
         // Update the markets outcome token holdings
         _updateHoldings(msg.sender, bucketIds, shares);
 
-        // Update the traders total stake
-        tradersStake[msg.sender].totalStake += msg.value;
+        // Update the voters total stake
+        tradersStake[msg.sender].totalStake += votingPower[msg.sender];
 
         emit BoughtShares(msg.sender, costDiff, newTotalQSquared);
     }
 
-    /**
-     * @notice Sell a set of shares
-     *
-     * @dev Burn the trader's outcome tokens in the buckets they want to sell in exchange for their market value
-     * This corresponds to the difference in the cost function between where the market is, and where it will be after
-     * they burn their shares
-     * NOTE:
-     * - This forfeits the trader's stake, so they should be sure they are selling for a profit
-     *
-     * @param bucketIds The bucket IDs for the trader's prediction
-     * @param shares The shares for the trader's prediction
-     */
-    function sellShares(
-        int256[] memory bucketIds,
-        int256[] memory shares
-    ) external {
-        if (tradersStake[msg.sender].totalStake == 0) revert NothingToPay();
-        if (resolvedAtTimestamp != 0) revert MarketIsResolved();
-        if (marketVoided) revert MarketIsVoided();
-
-        /**
-         * We only allow negative share changes, so if any shares are positive, revert
-         * This is because we don't want to allow traders to increase their position using this function
-         * The function is not payable and we don't check they have provided enough funds to cover the cost of the
-         * increase
-         * TODO: move this to the calculateCostOfTrade function to avoid extra loop
-         */
-        for (uint256 i; i < shares.length; i++) {
-            if (shares[i] > 0) revert InvalidSharesValue();
-        }
-
-        (int256 costDiff, int256 newTotalQSquared) = calculateCostOfTrade(
-            bucketIds,
-            shares
-        );
-
-        // If the cost difference is positive, revert
-        // Otherwise this would mean they need to pay to sell their position
-        if (costDiff > 0) revert NothingToPay();
-
-        _updateHoldings(msg.sender, bucketIds, shares);
-
-        // Set new market values
-        totalQSquared = newTotalQSquared;
-
-        // Trader sells position, set their stake to 0
-        tradersStake[msg.sender].totalStake = 0;
-
-        // Transfer the trader's payout
-        // We use -costDiff as the payout is the difference in cost between the trader's prediction and the existing
-        // cost. We know this is negative as we checked for that above, so negating it will give a positive value which
-        // corrosponds to how much the market should pay the trader
-        (bool success, ) = msg.sender.call{value: uint256(-costDiff)}("");
-        if (!success) revert TransferFailed();
-
-        emit SoldShares(msg.sender, costDiff, newTotalQSquared);
-    }
-
-    function collectPayout(address trader) external {
+    function collectPayout(address trader) external onlyVotingContract {
         if (resolvedAtTimestamp == 0) revert MarketIsOpen();
         if (block.timestamp < resolvedAtTimestamp + withdrawlDelayPeriod)
             revert WithdrawalDelayPeriodNotPassed();
         if (marketVoided) revert MarketIsVoided();
 
-        // Calculate payout
+        // Calculate payout (TODO: change implementation later)
         uint256 payout = _calculatePayout(trader);
 
         // If caller has no stake, has already claimed, revert
@@ -533,7 +486,7 @@ contract OnitInfiniteOutcomeDPM is
      *
      * @param trader The address of the trader
      *
-     * @return payout The payout amount
+     * @return payout The payout amount, TODO: adjust on new system
      */
     function _calculatePayout(address trader) internal view returns (uint256) {
         // Get total shares in winning bucket
@@ -552,6 +505,15 @@ contract OnitInfiniteOutcomeDPM is
                         .div(convert(totalBucketShares))
                 )
             );
+    }
+
+    // ----------------------------------------------------------------
+    // Modifier
+    // ----------------------------------------------------------------
+
+    modifier onlyVotingContract() {
+        require(msg.sender == votinContractAddress, "Only voting contract");
+        _;
     }
 
     // ----------------------------------------------------------------

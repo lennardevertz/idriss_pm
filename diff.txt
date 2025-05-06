@@ -13,7 +13,7 @@
 
 1.2 Asset & Position Model
   - Onit: Bets in native ETH, positions represented by ERC1155 NFTs, protocol & creator fees in ETH.
-  - Planned: Global ERC20 (ABC) staking contract; no per‐market NFTs (remove all ERC1155/NFT logic eventually); stakes earn emissions; slashing & rewards in ABC.
+  - Planned: Global ERC20 (ABC) staking contract; stakes earn emissions; slashing & rewards in ABC.
   - Virtual payment model: staking amounts act as theoretical cost inputs—no token transfer on share issuance; actual ABC transfers occur only during reward/slashing settlement.
   - ABC staking contract design can reuse UMA’s staking contract implementation almost verbatim.
 
