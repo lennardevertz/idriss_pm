@@ -60,3 +60,126 @@
 - Add governance (Ownable/AccessControl) for global & per-topic params.
 - Emit events & view functions for phases, timeRemaining, submissions, aggregates.
 - Write comprehensive unit tests & perform gas/security audits.
+# 3. Refactoring VotingV2.sol for Confidence-Based Prediction Market
+
+This section outlines the planned refactoring of the `VotingV2.sol` contract to adapt it for the new confidence-based prediction market system. The core idea is to retain the `Staker` contract's functionality for managing ABC token staking, emissions, and cooldowns, while removing the UMA DVM-specific voting and price resolution mechanisms.
+
+## 3.1. Core Strategy
+- **Keep:** `Staker` contract inheritance and its core logic (staking, unstaking, emissions, reward accounting framework, `votingToken`, `Ownable`, `Lockable`, `MultiCaller`).
+- **Remove/Replace:** All UMA DVM-specific components related to price requests, commit-reveal voting, round management, UMA oracle interactions, and UMA-specific slashing/reward calculations.
+- **Adapt:** The `_updateTrackers` and `_updateAccountSlashingTrackers` functions will be repurposed. Their internal logic will be rewritten to iterate through closed topics (Onit markets), fetch results from the Onit market (mean, std dev, winning buckets), determine if a user's confidence submission was in-band or out-of-band, and then apply rewards or slashes accordingly.
+
+## 3.2. Elements to be Deleted from VotingV2.sol
+
+### 3.2.1. Functions to Delete:
+- **UMA Price Request & Oracle Interaction:**
+    - `requestPrice(bytes32, uint256, bytes memory)` (and its overloaded version)
+    - `requestGovernanceAction(bytes32, uint256, bytes memory)`
+    - `_requestPrice(bytes32, uint256, bytes memory, bool)`
+    - `getRoundIdToVoteOnRequest(uint32)`
+    - `hasPrice(bytes32, uint256, bytes memory)` (and its overloaded version)
+    - `getPrice(bytes32, uint256, bytes memory)` (and its overloaded version)
+    - `getPriceRequestStatuses(PendingRequestAncillary[] memory)`
+    - `_getPriceOrError(bytes32, uint256, bytes memory)`
+    - `_getPriceFromPreviousVotingContract(bytes32, uint256, bytes memory)`
+    - `_getPriceRequest(bytes32, uint256, bytes memory)`
+    - `_encodePriceRequest(bytes32, uint256, bytes memory)`
+    - `_getIdentifierWhitelist()`
+    - `_requireRegisteredContract()`
+- **Commit-Reveal Voting:**
+    - `commitVote(bytes32, uint256, bytes memory, bytes32)`
+    - `revealVote(bytes32, uint256, int256, bytes memory, int256)`
+    - `commitAndEmitEncryptedVote(bytes32, uint256, bytes memory, bytes32, bytes memory)`
+- **UMA Round and Phase Management:**
+    - `getPendingRequests()`
+    - `currentActiveRequests()`
+    - `getVotePhase()` (VotingV2Interface version)
+    - `getCurrentRoundId()` (VotingV2Interface version)
+    - `getRoundEndTime(uint256)`
+    - `_freezeRoundVariables(uint256)`
+    - `_inActiveReveal()` (Staker override)
+    - `_computePendingStakes(address, uint128)` (Staker override)
+- **UMA Request Processing & Lifecycle:**
+    - `getNumberOfPriceRequests()`
+    - `getNumberOfPriceRequestsPostUpdate()`
+    - `processResolvablePriceRequests()`
+    - `processResolvablePriceRequestsRange(uint64)`
+    - `_processResolvablePriceRequests(uint64)`
+    - `_removeRequestFromPendingPriceRequestsIds(uint64)`
+    - `_getRequestStatus(PriceRequest storage, uint32)`
+    - `_getResolvedPrice(VoteInstance storage, uint256)`
+    - `_shouldDeleteRequest(uint256, bool)`
+    - `_getActualRollCount(PriceRequest storage, uint32)`
+    - `isNextRequestRoundDifferent(uint64)`
+- **UMA-Specific Slashing & Reward Logic:**
+    - `requestSlashingTrackers(uint256)`
+    - `getVoterParticipation(uint256, uint32, address)`
+    - `_getStartingIndexForStaker()` (Staker override)
+- **UMA DVM Admin & Migration:**
+    - `setMigrated(address)`
+    - `setMaxRolls(uint32)`
+    - `setMaxRequestPerRound(uint32)`
+    - `setGatAndSpat(uint128, uint64)`
+    - `setSlashingLibrary(address)`
+    - `retrieveRewardsOnMigratedVotingContract(...)`
+    - `_requireNotMigrated()`
+
+### 3.2.2. State Variables to Delete:
+- `lastRoundIdProcessed`
+- `nextPendingIndexToProcess`
+- `finder`
+- `slashingLibrary` (UMA SlashingLibraryInterface instance)
+- `voteTiming`
+- `previousVotingContract`
+- `rounds` (mapping)
+- `priceRequests` (mapping)
+- `resolvedPriceRequestIds` (array)
+- `pendingPriceRequestsIds` (array)
+- `maxRolls`
+- `maxRequestsPerRound`
+- `migratedAddress`
+- `gat`
+- `spat`
+
+### 3.2.3. Structs and Enums to Delete/Redesign:
+- `PriceRequest`
+- `VoteInstance`
+- `VoteSubmission`
+- `Round`
+- `SlashingTracker` (UMA version)
+- `RequestStatus` (enum)
+- `RequestState`
+
+### 3.2.4. Events to Delete:
+- `VoteCommitted`
+- `EncryptedVote`
+- `VoteRevealed`
+- `RequestAdded`
+- `RequestResolved`
+- `VotingContractMigrated`
+- `RequestDeleted`
+- `RequestRolled`
+- `GatAndSpatChanged`
+- `SlashingLibraryChanged`
+- `MaxRollsChanged`
+- `MaxRequestsPerRoundChanged`
+- `VoterSlashed` (UMA version)
+
+### 3.2.5. Constructor Parameters to Remove:
+- `_phaseLength`
+- `_maxRolls`
+- `_maxRequestsPerRound`
+- `_gat`
+- `_spat`
+- `_finder`
+- `_slashingLibrary`
+- `_previousVotingContract`
+(Parameters `_emissionRate`, `_unstakeCoolDown`, `_votingToken` for `Staker` will be kept.)
+
+## 3.3. New Functionality to be Added (Conceptual)
+- `createTopic()`: Acts as a proxy to create an Onit market. Will store market details and state (open/closed).
+- `submitConfidence()`: Replaces UMA's `commitVote`/`revealVote`. Will interact with the Onit market (e.g., `buyShares`). Will record user's participation in a new mapping (user -> list of markets they voted on).
+- Onit market `finalize()`: This function (external to this refactored contract, part of OnitInfiniteOutcomeDPM) will calculate mean, standard deviation, and winning bucket percentages.
+- Modified `_updateTrackers` / `_updateAccountSlashingTrackers`: Will iterate closed markets, fetch results from the Onit market's `finalize` output, and distribute rewards/slashes.
+
+This refactoring aims to create a lean contract focused on staking and interaction with the Onit DPM for confidence scoring, leveraging UMA's robust staking infrastructure while implementing a custom market mechanism.

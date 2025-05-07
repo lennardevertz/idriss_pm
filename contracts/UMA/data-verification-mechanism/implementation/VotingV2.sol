@@ -23,7 +23,13 @@ import "../interfaces/SlashingLibraryInterface.sol";
  * @dev Handles receiving and resolving price requests via a commit-reveal voting schelling scheme.
  */
 
-contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGovernanceInterface, VotingV2Interface {
+contract VotingV2 is
+    Staker,
+    OracleInterface,
+    OracleAncillaryInterface,
+    OracleGovernanceInterface,
+    VotingV2Interface
+{
     using VoteTiming for VoteTiming.Data;
     using ResultComputationV2 for ResultComputationV2.Data;
 
@@ -180,9 +186,19 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
 
     event VotingContractMigrated(address newAddress);
 
-    event RequestDeleted(bytes32 indexed identifier, uint256 indexed time, bytes ancillaryData, uint32 rollCount);
+    event RequestDeleted(
+        bytes32 indexed identifier,
+        uint256 indexed time,
+        bytes ancillaryData,
+        uint32 rollCount
+    );
 
-    event RequestRolled(bytes32 indexed identifier, uint256 indexed time, bytes ancillaryData, uint32 rollCount);
+    event RequestRolled(
+        bytes32 indexed identifier,
+        uint256 indexed time,
+        bytes ancillaryData,
+        uint32 rollCount
+    );
 
     event GatAndSpatChanged(uint128 newGat, uint64 newSpat);
 
@@ -192,9 +208,17 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
 
     event MaxRequestsPerRoundChanged(uint32 newMaxRequestsPerRound);
 
-    event VoterSlashApplied(address indexed voter, int128 slashedTokens, uint128 postStake);
+    event VoterSlashApplied(
+        address indexed voter,
+        int128 slashedTokens,
+        uint128 postStake
+    );
 
-    event VoterSlashed(address indexed voter, uint256 indexed requestIndex, int128 slashedTokens);
+    event VoterSlashed(
+        address indexed voter,
+        uint256 indexed requestIndex,
+        int128 slashedTokens
+    );
 
     /**
      * @notice Construct the VotingV2 contract.
@@ -225,7 +249,9 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
     ) Staker(_emissionRate, _unstakeCoolDown, _votingToken) {
         voteTiming.init(_phaseLength);
         finder = FinderInterface(_finder);
-        previousVotingContract = OracleAncillaryInterface(_previousVotingContract);
+        previousVotingContract = OracleAncillaryInterface(
+            _previousVotingContract
+        );
         setGatAndSpat(_gat, _spat);
         setSlashingLibrary(_slashingLibrary);
         setMaxRequestPerRound(_maxRequestsPerRound);
@@ -298,16 +324,32 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
         bool isGovernance
     ) internal {
         require(time <= getCurrentTime(), "Can only request in past");
-        require(isGovernance || _getIdentifierWhitelist().isIdentifierSupported(identifier), "Unsupported identifier");
-        require(ancillaryData.length <= ANCILLARY_BYTES_LIMIT, "Invalid ancillary data");
+        require(
+            isGovernance ||
+                _getIdentifierWhitelist().isIdentifierSupported(identifier),
+            "Unsupported identifier"
+        );
+        require(
+            ancillaryData.length <= ANCILLARY_BYTES_LIMIT,
+            "Invalid ancillary data"
+        );
 
-        bytes32 priceRequestId = _encodePriceRequest(identifier, time, ancillaryData);
+        bytes32 priceRequestId = _encodePriceRequest(
+            identifier,
+            time,
+            ancillaryData
+        );
         PriceRequest storage priceRequest = priceRequests[priceRequestId];
 
         // Price has never been requested.
         uint32 currentRoundId = getCurrentRoundId();
-        if (_getRequestStatus(priceRequest, currentRoundId) == RequestStatus.NotRequested) {
-            uint32 roundIdToVoteOn = getRoundIdToVoteOnRequest(currentRoundId + 1);
+        if (
+            _getRequestStatus(priceRequest, currentRoundId) ==
+            RequestStatus.NotRequested
+        ) {
+            uint32 roundIdToVoteOn = getRoundIdToVoteOnRequest(
+                currentRoundId + 1
+            );
             ++rounds[roundIdToVoteOn].numberOfRequestsToVote;
             priceRequest.identifier = identifier;
             priceRequest.time = uint64(time);
@@ -316,7 +358,14 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
             if (isGovernance) priceRequest.isGovernance = isGovernance;
 
             pendingPriceRequestsIds.push(priceRequestId);
-            emit RequestAdded(msg.sender, roundIdToVoteOn, identifier, time, ancillaryData, isGovernance);
+            emit RequestAdded(
+                msg.sender,
+                roundIdToVoteOn,
+                identifier,
+                time,
+                ancillaryData,
+                isGovernance
+            );
         }
     }
 
@@ -325,8 +374,12 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
      * @param targetRoundId round ID to start searching for a round to vote on.
      * @return uint32 round ID that a request should be voted on.
      */
-    function getRoundIdToVoteOnRequest(uint32 targetRoundId) public view returns (uint32) {
-        while (rounds[targetRoundId].numberOfRequestsToVote >= maxRequestsPerRound) ++targetRoundId;
+    function getRoundIdToVoteOnRequest(
+        uint32 targetRoundId
+    ) public view returns (uint32) {
+        while (
+            rounds[targetRoundId].numberOfRequestsToVote >= maxRequestsPerRound
+        ) ++targetRoundId;
         return targetRoundId;
     }
 
@@ -342,7 +395,11 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
         uint256 time,
         bytes memory ancillaryData
     ) public view override onlyRegisteredContract returns (bool) {
-        (bool _hasPrice, , ) = _getPriceOrError(identifier, time, ancillaryData);
+        (bool _hasPrice, , ) = _getPriceOrError(
+            identifier,
+            time,
+            ancillaryData
+        );
         return _hasPrice;
     }
 
@@ -353,7 +410,10 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
      * @param time unix timestamp of the price request.
      * @return bool if the DVM has resolved to a price for the given identifier and timestamp.
      */
-    function hasPrice(bytes32 identifier, uint256 time) external view override returns (bool) {
+    function hasPrice(
+        bytes32 identifier,
+        uint256 time
+    ) external view override returns (bool) {
         return hasPrice(identifier, time, "");
     }
 
@@ -370,7 +430,11 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
         uint256 time,
         bytes memory ancillaryData
     ) public view override onlyRegisteredContract returns (int256) {
-        (bool _hasPrice, int256 price, string memory message) = _getPriceOrError(identifier, time, ancillaryData);
+        (
+            bool _hasPrice,
+            int256 price,
+            string memory message
+        ) = _getPriceOrError(identifier, time, ancillaryData);
 
         // If the price wasn't available, revert with the provided message.
         require(_hasPrice, message);
@@ -385,7 +449,10 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
      * @param time unix timestamp of the price request.
      * @return int256 representing the resolved price for the given identifier and timestamp.
      */
-    function getPrice(bytes32 identifier, uint256 time) external view override returns (int256) {
+    function getPrice(
+        bytes32 identifier,
+        uint256 time
+    ) external view override returns (int256) {
         return getPrice(identifier, time, "");
     }
 
@@ -395,22 +462,30 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
      * @param requests array of pending requests which includes identifier, timestamp & ancillary data for the requests.
      * @return requestStates a list, in the same order as the input list, giving the status of the specified requests.
      */
-    function getPriceRequestStatuses(PendingRequestAncillary[] memory requests)
-        public
-        view
-        returns (RequestState[] memory)
-    {
-        RequestState[] memory requestStates = new RequestState[](requests.length);
+    function getPriceRequestStatuses(
+        PendingRequestAncillary[] memory requests
+    ) public view returns (RequestState[] memory) {
+        RequestState[] memory requestStates = new RequestState[](
+            requests.length
+        );
         uint32 currentRoundId = getCurrentRoundId();
         for (uint256 i = 0; i < requests.length; i = unsafe_inc(i)) {
-            PriceRequest storage priceRequest =
-                _getPriceRequest(requests[i].identifier, requests[i].time, requests[i].ancillaryData);
+            PriceRequest storage priceRequest = _getPriceRequest(
+                requests[i].identifier,
+                requests[i].time,
+                requests[i].ancillaryData
+            );
 
-            RequestStatus status = _getRequestStatus(priceRequest, currentRoundId);
+            RequestStatus status = _getRequestStatus(
+                priceRequest,
+                currentRoundId
+            );
 
             // If it's an active request, its true lastVotingRound is the current one, even if it hasn't been updated.
-            if (status == RequestStatus.Active) requestStates[i].lastVotingRound = currentRoundId;
-            else requestStates[i].lastVotingRound = priceRequest.lastVotingRound;
+            if (status == RequestStatus.Active)
+                requestStates[i].lastVotingRound = currentRoundId;
+            else
+                requestStates[i].lastVotingRound = priceRequest.lastVotingRound;
             requestStates[i].status = status;
         }
         return requestStates;
@@ -443,13 +518,34 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
         _updateTrackers(voter);
 
         require(hash != bytes32(0), "Invalid commit hash");
-        require(getVotePhase() == Phase.Commit, "Cannot commit in reveal phase");
-        PriceRequest storage priceRequest = _getPriceRequest(identifier, time, ancillaryData);
-        require(_getRequestStatus(priceRequest, currentRoundId) == RequestStatus.Active, "Request must be active");
+        require(
+            getVotePhase() == Phase.Commit,
+            "Cannot commit in reveal phase"
+        );
+        PriceRequest storage priceRequest = _getPriceRequest(
+            identifier,
+            time,
+            ancillaryData
+        );
+        require(
+            _getRequestStatus(priceRequest, currentRoundId) ==
+                RequestStatus.Active,
+            "Request must be active"
+        );
 
-        priceRequest.voteInstances[currentRoundId].voteSubmissions[voter].commit = hash;
+        priceRequest
+            .voteInstances[currentRoundId]
+            .voteSubmissions[voter]
+            .commit = hash;
 
-        emit VoteCommitted(voter, msg.sender, currentRoundId, identifier, time, ancillaryData);
+        emit VoteCommitted(
+            voter,
+            msg.sender,
+            currentRoundId,
+            identifier,
+            time,
+            ancillaryData
+        );
     }
 
     /**
@@ -471,12 +567,20 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
     ) public override nonReentrant {
         uint32 currentRoundId = getCurrentRoundId();
         _freezeRoundVariables(currentRoundId);
-        VoteInstance storage voteInstance =
-            _getPriceRequest(identifier, time, ancillaryData).voteInstances[currentRoundId];
+        VoteInstance storage voteInstance = _getPriceRequest(
+            identifier,
+            time,
+            ancillaryData
+        ).voteInstances[currentRoundId];
         address voter = getVoterFromDelegate(msg.sender);
-        VoteSubmission storage voteSubmission = voteInstance.voteSubmissions[voter];
+        VoteSubmission storage voteSubmission = voteInstance.voteSubmissions[
+            voter
+        ];
 
-        require(getVotePhase() == Phase.Reveal, "Reveal phase has not started yet"); // Can only reveal in reveal phase.
+        require(
+            getVotePhase() == Phase.Reveal,
+            "Reveal phase has not started yet"
+        ); // Can only reveal in reveal phase.
 
         // Zero hashes are blocked in commit; they indicate a different error: voter did not commit or already revealed.
         require(voteSubmission.commit != bytes32(0), "Invalid hash reveal");
@@ -484,8 +588,17 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
         // Check that the hash that was committed matches to the one that was revealed. Note that if the voter had
         // then they must reveal with the same account they had committed with.
         require(
-            keccak256(abi.encodePacked(price, salt, voter, time, ancillaryData, uint256(currentRoundId), identifier)) ==
-                voteSubmission.commit,
+            keccak256(
+                abi.encodePacked(
+                    price,
+                    salt,
+                    voter,
+                    time,
+                    ancillaryData,
+                    uint256(currentRoundId),
+                    identifier
+                )
+            ) == voteSubmission.commit,
             "Revealed data != commit hash"
         );
 
@@ -494,9 +607,19 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
 
         // Calculate the voters effective stake for this round as the difference between their stake and pending stake.
         // This allows for the voter to have staked during this reveal phase and not consider their pending stake.
-        uint128 effectiveStake = voterStakes[voter].stake - voterStakes[voter].pendingStakes[currentRoundId];
+        uint128 effectiveStake = voterStakes[voter].stake -
+            voterStakes[voter].pendingStakes[currentRoundId];
         voteInstance.results.addVote(price, effectiveStake); // Add vote to the results.
-        emit VoteRevealed(voter, msg.sender, currentRoundId, identifier, time, ancillaryData, price, effectiveStake);
+        emit VoteRevealed(
+            voter,
+            msg.sender,
+            currentRoundId,
+            identifier,
+            time,
+            ancillaryData,
+            price,
+            effectiveStake
+        );
     }
 
     /**
@@ -517,7 +640,14 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
         bytes memory encryptedVote
     ) public override {
         commitVote(identifier, time, ancillaryData, hash);
-        emit EncryptedVote(msg.sender, getCurrentRoundId(), identifier, time, ancillaryData, encryptedVote);
+        emit EncryptedVote(
+            msg.sender,
+            getCurrentRoundId(),
+            identifier,
+            time,
+            ancillaryData,
+            encryptedVote
+        );
     }
 
     /****************************************
@@ -531,22 +661,41 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
      * processResolvablePriceRequests() method.
      * @return pendingRequests array containing identifiers of type PendingRequestAncillaryAugmented.
      */
-    function getPendingRequests() public view override returns (PendingRequestAncillaryAugmented[] memory) {
+    function getPendingRequests()
+        public
+        view
+        override
+        returns (PendingRequestAncillaryAugmented[] memory)
+    {
         // Solidity memory arrays aren't resizable (and reading storage is expensive). Hence this hackery to filter
         // pendingPriceRequestsIds only to those requests that have an Active RequestStatus.
-        PendingRequestAncillaryAugmented[] memory unresolved =
-            new PendingRequestAncillaryAugmented[](pendingPriceRequestsIds.length);
+        PendingRequestAncillaryAugmented[]
+            memory unresolved = new PendingRequestAncillaryAugmented[](
+                pendingPriceRequestsIds.length
+            );
         uint256 numUnresolved = 0;
         uint32 currentRoundId = getCurrentRoundId();
 
-        for (uint256 i = 0; i < pendingPriceRequestsIds.length; i = unsafe_inc(i)) {
-            PriceRequest storage priceRequest = priceRequests[pendingPriceRequestsIds[i]];
-            if (_getRequestStatus(priceRequest, currentRoundId) == RequestStatus.Active) {
+        for (
+            uint256 i = 0;
+            i < pendingPriceRequestsIds.length;
+            i = unsafe_inc(i)
+        ) {
+            PriceRequest storage priceRequest = priceRequests[
+                pendingPriceRequestsIds[i]
+            ];
+            if (
+                _getRequestStatus(priceRequest, currentRoundId) ==
+                RequestStatus.Active
+            ) {
                 unresolved[numUnresolved] = PendingRequestAncillaryAugmented({
                     lastVotingRound: priceRequest.lastVotingRound,
                     isGovernance: priceRequest.isGovernance,
                     time: priceRequest.time,
-                    rollCount: _getActualRollCount(priceRequest, currentRoundId),
+                    rollCount: _getActualRollCount(
+                        priceRequest,
+                        currentRoundId
+                    ),
                     identifier: priceRequest.identifier,
                     ancillaryData: priceRequest.ancillaryData
                 });
@@ -554,9 +703,12 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
             }
         }
 
-        PendingRequestAncillaryAugmented[] memory pendingRequests =
-            new PendingRequestAncillaryAugmented[](numUnresolved);
-        for (uint256 i = 0; i < numUnresolved; i = unsafe_inc(i)) pendingRequests[i] = unresolved[i];
+        PendingRequestAncillaryAugmented[]
+            memory pendingRequests = new PendingRequestAncillaryAugmented[](
+                numUnresolved
+            );
+        for (uint256 i = 0; i < numUnresolved; i = unsafe_inc(i))
+            pendingRequests[i] = unresolved[i];
 
         return pendingRequests;
     }
@@ -567,9 +719,17 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
      */
     function currentActiveRequests() public view returns (bool) {
         uint32 currentRoundId = getCurrentRoundId();
-        for (uint256 i = 0; i < pendingPriceRequestsIds.length; i = unsafe_inc(i))
-            if (_getRequestStatus(priceRequests[pendingPriceRequestsIds[i]], currentRoundId) == RequestStatus.Active)
-                return true;
+        for (
+            uint256 i = 0;
+            i < pendingPriceRequestsIds.length;
+            i = unsafe_inc(i)
+        )
+            if (
+                _getRequestStatus(
+                    priceRequests[pendingPriceRequestsIds[i]],
+                    currentRoundId
+                ) == RequestStatus.Active
+            ) return true;
 
         return false;
     }
@@ -611,7 +771,10 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
     function getNumberOfPriceRequests()
         public
         view
-        returns (uint256 numberPendingPriceRequests, uint256 numberResolvedPriceRequests)
+        returns (
+            uint256 numberPendingPriceRequests,
+            uint256 numberResolvedPriceRequests
+        )
     {
         return (pendingPriceRequestsIds.length, resolvedPriceRequestIds.length);
     }
@@ -624,7 +787,10 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
      */
     function getNumberOfPriceRequestsPostUpdate()
         external
-        returns (uint256 numberPendingPriceRequests, uint256 numberResolvedPriceRequests)
+        returns (
+            uint256 numberPendingPriceRequests,
+            uint256 numberResolvedPriceRequests
+        )
     {
         processResolvablePriceRequests();
         return getNumberOfPriceRequests();
@@ -636,17 +802,26 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
      * @return SlashingTracker Tracker object contains the slashed UMA per staked UMA per wrong vote and no vote, the
      * total UMA slashed in the round and the total number of correct votes in the round.
      */
-    function requestSlashingTrackers(uint256 requestIndex) public view returns (SlashingTracker memory) {
-        PriceRequest storage priceRequest = priceRequests[resolvedPriceRequestIds[requestIndex]];
+    function requestSlashingTrackers(
+        uint256 requestIndex
+    ) public view returns (SlashingTracker memory) {
+        PriceRequest storage priceRequest = priceRequests[
+            resolvedPriceRequestIds[requestIndex]
+        ];
         uint32 lastVotingRound = priceRequest.lastVotingRound;
-        VoteInstance storage voteInstance = priceRequest.voteInstances[lastVotingRound];
+        VoteInstance storage voteInstance = priceRequest.voteInstances[
+            lastVotingRound
+        ];
 
         uint256 totalVotes = voteInstance.results.totalVotes;
-        uint256 totalCorrectVotes = voteInstance.results.getTotalCorrectlyVotedTokens();
+        uint256 totalCorrectVotes = voteInstance
+            .results
+            .getTotalCorrectlyVotedTokens();
         uint256 totalStaked = rounds[lastVotingRound].cumulativeStakeAtRound;
 
-        (uint256 wrongVoteSlash, uint256 noVoteSlash) =
-            rounds[lastVotingRound].slashingLibrary.calcSlashing(
+        (uint256 wrongVoteSlash, uint256 noVoteSlash) = rounds[lastVotingRound]
+            .slashingLibrary
+            .calcSlashing(
                 totalStaked,
                 totalVotes,
                 totalCorrectVotes,
@@ -654,10 +829,17 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
                 priceRequest.isGovernance
             );
 
-        uint256 totalSlashed =
-            ((noVoteSlash * (totalStaked - totalVotes)) + (wrongVoteSlash * (totalVotes - totalCorrectVotes))) / 1e18;
+        uint256 totalSlashed = ((noVoteSlash * (totalStaked - totalVotes)) +
+            (wrongVoteSlash * (totalVotes - totalCorrectVotes))) / 1e18;
 
-        return SlashingTracker(wrongVoteSlash, noVoteSlash, totalSlashed, totalCorrectVotes, lastVotingRound);
+        return
+            SlashingTracker(
+                wrongVoteSlash,
+                noVoteSlash,
+                totalSlashed,
+                totalCorrectVotes,
+                lastVotingRound
+            );
     }
 
     /**
@@ -672,11 +854,13 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
         uint32 lastVotingRound,
         address voter
     ) public view returns (VoteParticipation) {
-        VoteInstance storage voteInstance =
-            priceRequests[resolvedPriceRequestIds[requestIndex]].voteInstances[lastVotingRound];
+        VoteInstance storage voteInstance = priceRequests[
+            resolvedPriceRequestIds[requestIndex]
+        ].voteInstances[lastVotingRound];
         bytes32 revealHash = voteInstance.voteSubmissions[voter].revealHash;
         if (revealHash == bytes32(0)) return VoteParticipation.DidNotVote;
-        if (voteInstance.results.wasVoteCorrect(revealHash)) return VoteParticipation.CorrectVote;
+        if (voteInstance.results.wasVoteCorrect(revealHash))
+            return VoteParticipation.CorrectVote;
         return VoteParticipation.WrongVote;
     }
 
@@ -712,7 +896,9 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
      * @dev Can only be called by the contract owner.
      * @param newMaxRequestsPerRound the new maximum number of requests that can be made in a single round.
      */
-    function setMaxRequestPerRound(uint32 newMaxRequestsPerRound) public override onlyOwner {
+    function setMaxRequestPerRound(
+        uint32 newMaxRequestsPerRound
+    ) public override onlyOwner {
         require(newMaxRequestsPerRound > 0);
         maxRequestsPerRound = newMaxRequestsPerRound;
         emit MaxRequestsPerRoundChanged(newMaxRequestsPerRound);
@@ -725,7 +911,10 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
      * @param newGat sets the next round's GAT and going forward.
      * @param newSpat sets the next round's SPAT and going forward.
      */
-    function setGatAndSpat(uint128 newGat, uint64 newSpat) public override onlyOwner {
+    function setGatAndSpat(
+        uint128 newGat,
+        uint64 newSpat
+    ) public override onlyOwner {
         require(newGat < votingToken.totalSupply() && newGat > 0);
         require(newSpat > 0 && newSpat < 1e18);
         gat = newGat;
@@ -738,7 +927,9 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
      * @notice Changes the slashing library used by this contract.
      * @param _newSlashingLibrary new slashing library address.
      */
-    function setSlashingLibrary(address _newSlashingLibrary) public override onlyOwner {
+    function setSlashingLibrary(
+        address _newSlashingLibrary
+    ) public override onlyOwner {
         slashingLibrary = SlashingLibraryInterface(_newSlashingLibrary);
         emit SlashingLibraryChanged(_newSlashingLibrary);
     }
@@ -791,7 +982,9 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
      * the number of elements to be processed is large and the associated gas cost is too high.
      * @param maxTraversals maximum number of resolved requests to traverse in this call.
      */
-    function processResolvablePriceRequestsRange(uint64 maxTraversals) external {
+    function processResolvablePriceRequestsRange(
+        uint64 maxTraversals
+    ) external {
         _processResolvablePriceRequests(maxTraversals);
     }
 
@@ -812,7 +1005,10 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
     // This function must be called before any tokens are staked. It updates the voter's pending stakes to reflect the
     // new amount to stake. These updates are only made if we are in an active reveal. This is required to appropriately
     // calculate a voter's trackers and avoid slashing them for amounts staked during an active reveal phase.
-    function _computePendingStakes(address voter, uint128 amount) internal override {
+    function _computePendingStakes(
+        address voter,
+        uint128 amount
+    ) internal override {
         if (_inActiveReveal()) {
             uint32 currentRoundId = getCurrentRoundId();
             // Freeze round variables to prevent cumulativeActiveStakeAtRound from changing based on the stakes during
@@ -829,42 +1025,69 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
     // voting activity the voters balance is updated accordingly. The caller can provide a maxTraversals parameter to
     // limit the number of resolved requests to traverse in this call to bound the gas used. Note each iteration of
     // this function re-uses a fresh slash variable to produce useful logs on the amount a voter is slashed.
-    function _updateAccountSlashingTrackers(address voter, uint64 maxTraversals) internal {
+    function _updateAccountSlashingTrackers(
+        address voter,
+        uint64 maxTraversals
+    ) internal {
         VoterStake storage voterStake = voterStakes[voter];
         uint64 requestIndex = voterStake.nextIndexToProcess; // Traverse all requests from the last considered request.
 
         // Traverse all elements within the resolvedPriceRequestIds array and update the voter's trackers according to
         // their voting activity. Bound the number of iterations to the maxTraversals parameter to cap the gas used.
-        while (requestIndex < resolvedPriceRequestIds.length && maxTraversals > 0) {
+        while (
+            requestIndex < resolvedPriceRequestIds.length && maxTraversals > 0
+        ) {
             maxTraversals = unsafe_dec_64(maxTraversals); // reduce the number of traversals left & re-use the prop.
 
             // Get the slashing for this request. This comes from the slashing library and informs to the voter slash.
-            SlashingTracker memory trackers = requestSlashingTrackers(requestIndex);
+            SlashingTracker memory trackers = requestSlashingTrackers(
+                requestIndex
+            );
 
             // Use the effective stake as the difference between the current stake and pending stake. The staker will
             //have a pending stake if they staked during an active reveal for the voting round in question.
-            uint256 effectiveStake = voterStake.stake - voterStake.pendingStakes[trackers.lastVotingRound];
+            uint256 effectiveStake = voterStake.stake -
+                voterStake.pendingStakes[trackers.lastVotingRound];
             int256 slash; // The amount to slash the voter by for this request. Reset on each entry to emit useful logs.
 
             // Get the voter participation for this request. This informs if the voter voted correctly or not.
-            VoteParticipation participation = getVoterParticipation(requestIndex, trackers.lastVotingRound, voter);
+            VoteParticipation participation = getVoterParticipation(
+                requestIndex,
+                trackers.lastVotingRound,
+                voter
+            );
 
             // The voter did not reveal or did not commit. Slash at noVote rate.
             if (participation == VoteParticipation.DidNotVote)
-                slash = -int256(Math.ceilDiv(effectiveStake * trackers.noVoteSlashPerToken, 1e18));
+                slash = -int256(
+                    Math.ceilDiv(
+                        effectiveStake * trackers.noVoteSlashPerToken,
+                        1e18
+                    )
+                );
 
                 // The voter did not vote with the majority. Slash at wrongVote rate.
             else if (participation == VoteParticipation.WrongVote)
-                slash = -int256(Math.ceilDiv(effectiveStake * trackers.wrongVoteSlashPerToken, 1e18));
+                slash = -int256(
+                    Math.ceilDiv(
+                        effectiveStake * trackers.wrongVoteSlashPerToken,
+                        1e18
+                    )
+                );
 
                 // Else, the voter voted correctly. Receive a pro-rate share of the other voters slash.
-            else slash = int256((effectiveStake * trackers.totalSlashed) / trackers.totalCorrectVotes);
+            else
+                slash = int256(
+                    (effectiveStake * trackers.totalSlashed) /
+                        trackers.totalCorrectVotes
+                );
 
             emit VoterSlashed(voter, requestIndex, int128(slash));
             voterStake.unappliedSlash += int128(slash);
 
             // If the next round is different to the current considered round, apply the slash to the voter.
-            if (isNextRequestRoundDifferent(requestIndex)) _applySlashToVoter(voterStake, voter);
+            if (isNextRequestRoundDifferent(requestIndex))
+                _applySlashToVoter(voterStake, voter);
 
             requestIndex = unsafe_inc_64(requestIndex); // Increment the request index.
         }
@@ -876,16 +1099,27 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
     // Applies a given slash to a given voter's stake. In the event the sum of the slash and the voter's stake is less
     // than 0, the voter's stake is set to 0 to prevent the voter's stake from going negative. unappliedSlash tracked
     // all slashing the staker has received but not yet applied to their stake. Apply it then set it to zero.
-    function _applySlashToVoter(VoterStake storage voterStake, address voter) internal {
+    function _applySlashToVoter(
+        VoterStake storage voterStake,
+        address voter
+    ) internal {
         if (voterStake.unappliedSlash + int128(voterStake.stake) > 0)
-            voterStake.stake = uint128(int128(voterStake.stake) + voterStake.unappliedSlash);
+            voterStake.stake = uint128(
+                int128(voterStake.stake) + voterStake.unappliedSlash
+            );
         else voterStake.stake = 0;
-        emit VoterSlashApplied(voter, voterStake.unappliedSlash, voterStake.stake);
+        emit VoterSlashApplied(
+            voter,
+            voterStake.unappliedSlash,
+            voterStake.stake
+        );
         voterStake.unappliedSlash = 0;
     }
 
     // Checks if the next round (index+1) is different to the current round (index).
-    function isNextRequestRoundDifferent(uint64 index) internal view returns (bool) {
+    function isNextRequestRoundDifferent(
+        uint64 index
+    ) internal view returns (bool) {
         if (index + 1 >= resolvedPriceRequestIds.length) return true;
 
         return
@@ -908,12 +1142,12 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
     function retrieveRewardsOnMigratedVotingContract(
         address voter,
         uint256 roundId,
-        MinimumVotingAncillaryInterface.PendingRequestAncillary[] memory toRetrieve
+        MinimumVotingAncillaryInterface.PendingRequestAncillary[]
+            memory toRetrieve
     ) external returns (uint256) {
-        uint256 rewards =
-            MinimumVotingAncillaryInterface(address(previousVotingContract))
-                .retrieveRewards(voter, roundId, toRetrieve)
-                .rawValue;
+        uint256 rewards = MinimumVotingAncillaryInterface(
+            address(previousVotingContract)
+        ).retrieveRewards(voter, roundId, toRetrieve).rawValue;
         return rewards;
     }
 
@@ -922,8 +1156,12 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
      ****************************************/
 
     // Deletes a request from the pending requests array, based on index. Swap and pop.
-    function _removeRequestFromPendingPriceRequestsIds(uint64 pendingRequestIndex) internal {
-        pendingPriceRequestsIds[pendingRequestIndex] = pendingPriceRequestsIds[pendingPriceRequestsIds.length - 1];
+    function _removeRequestFromPendingPriceRequestsIds(
+        uint64 pendingRequestIndex
+    ) internal {
+        pendingPriceRequestsIds[pendingRequestIndex] = pendingPriceRequestsIds[
+            pendingPriceRequestsIds.length - 1
+        ];
         pendingPriceRequestsIds.pop();
     }
 
@@ -935,30 +1173,43 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
         bytes32 identifier,
         uint256 time,
         bytes memory ancillaryData
-    )
-        internal
-        view
-        returns (
-            bool,
-            int256,
-            string memory
-        )
-    {
-        PriceRequest storage priceRequest = _getPriceRequest(identifier, time, ancillaryData);
+    ) internal view returns (bool, int256, string memory) {
+        PriceRequest storage priceRequest = _getPriceRequest(
+            identifier,
+            time,
+            ancillaryData
+        );
         uint32 currentRoundId = getCurrentRoundId();
-        RequestStatus requestStatus = _getRequestStatus(priceRequest, currentRoundId);
+        RequestStatus requestStatus = _getRequestStatus(
+            priceRequest,
+            currentRoundId
+        );
 
-        if (requestStatus == RequestStatus.Active) return (false, 0, "Current voting round not ended");
+        if (requestStatus == RequestStatus.Active)
+            return (false, 0, "Current voting round not ended");
         if (requestStatus == RequestStatus.Resolved) {
-            VoteInstance storage voteInstance = priceRequest.voteInstances[priceRequest.lastVotingRound];
-            (, int256 resolvedPrice) = _getResolvedPrice(voteInstance, priceRequest.lastVotingRound);
+            VoteInstance storage voteInstance = priceRequest.voteInstances[
+                priceRequest.lastVotingRound
+            ];
+            (, int256 resolvedPrice) = _getResolvedPrice(
+                voteInstance,
+                priceRequest.lastVotingRound
+            );
             return (true, resolvedPrice, "");
         }
 
-        if (requestStatus == RequestStatus.Future) return (false, 0, "Price is still to be voted on");
-        if (requestStatus == RequestStatus.ToDelete) return (false, 0, "Price will be deleted");
-        (bool previouslyResolved, int256 previousPrice) =
-            _getPriceFromPreviousVotingContract(identifier, time, ancillaryData);
+        if (requestStatus == RequestStatus.Future)
+            return (false, 0, "Price is still to be voted on");
+        if (requestStatus == RequestStatus.ToDelete)
+            return (false, 0, "Price will be deleted");
+        (
+            bool previouslyResolved,
+            int256 previousPrice
+        ) = _getPriceFromPreviousVotingContract(
+                identifier,
+                time,
+                ancillaryData
+            );
         if (previouslyResolved) return (true, previousPrice, "");
         return (false, 0, "Price was never requested");
     }
@@ -972,7 +1223,10 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
     ) private view returns (bool, int256) {
         if (address(previousVotingContract) == address(0)) return (false, 0);
         if (previousVotingContract.hasPrice(identifier, time, ancillaryData))
-            return (true, previousVotingContract.getPrice(identifier, time, ancillaryData));
+            return (
+                true,
+                previousVotingContract.getPrice(identifier, time, ancillaryData)
+            );
         return (false, 0);
     }
 
@@ -982,7 +1236,8 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
         uint256 time,
         bytes memory ancillaryData
     ) private view returns (PriceRequest storage) {
-        return priceRequests[_encodePriceRequest(identifier, time, ancillaryData)];
+        return
+            priceRequests[_encodePriceRequest(identifier, time, ancillaryData)];
     }
 
     // Returns an encoded bytes32 representing a price request. Used when storing/referencing price requests.
@@ -1005,7 +1260,9 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
             rounds[roundId].minParticipationRequirement = gat;
 
             // The minimum votes on the modal outcome for the vote to settle within this round is the SPAT (percentage).
-            rounds[roundId].minAgreementRequirement = uint128((spat * uint256(cumulativeStake)) / 1e18);
+            rounds[roundId].minAgreementRequirement = uint128(
+                (spat * uint256(cumulativeStake)) / 1e18
+            );
             rounds[roundId].cumulativeStakeAtRound = cumulativeStake; // Store the cumulativeStake to work slashing.
         }
     }
@@ -1020,12 +1277,18 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
         uint32 currentRoundId = getCurrentRoundId();
 
         // Load in the last resolved index for this round to continue off from where the last caller left.
-        uint64 requestIndex = lastRoundIdProcessed == currentRoundId ? nextPendingIndexToProcess : 0;
+        uint64 requestIndex = lastRoundIdProcessed == currentRoundId
+            ? nextPendingIndexToProcess
+            : 0;
         // Traverse pendingPriceRequestsIds array and update the requests status according to the state of the request
         //(i.e settle, roll or delete request). Bound iterations to the maxTraversals parameter to cap the gas used.
-        while (requestIndex < pendingPriceRequestsIds.length && maxTraversals > 0) {
+        while (
+            requestIndex < pendingPriceRequestsIds.length && maxTraversals > 0
+        ) {
             maxTraversals = unsafe_dec_64(maxTraversals);
-            PriceRequest storage request = priceRequests[pendingPriceRequestsIds[requestIndex]];
+            PriceRequest storage request = priceRequests[
+                pendingPriceRequestsIds[requestIndex]
+            ];
 
             // If the last voting round is greater than or equal to the current round then this request is currently
             // being voted on or is enqueued for the next round. In this case, skip it and increment the request index.
@@ -1035,14 +1298,21 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
             }
 
             // Else, we are dealing with a request that can either be: a) deleted, b) rolled or c) resolved.
-            VoteInstance storage voteInstance = request.voteInstances[request.lastVotingRound];
-            (bool isResolvable, int256 resolvedPrice) = _getResolvedPrice(voteInstance, request.lastVotingRound);
+            VoteInstance storage voteInstance = request.voteInstances[
+                request.lastVotingRound
+            ];
+            (bool isResolvable, int256 resolvedPrice) = _getResolvedPrice(
+                voteInstance,
+                request.lastVotingRound
+            );
 
             if (isResolvable) {
                 // If resolvable, resolve. This involves a) moving the requestId from pendingPriceRequestsIds array to
                 // resolvedPriceRequestIds array and b) removing requestId from pendingPriceRequestsIds. Don't need to
                 // increment requestIndex as from pendingPriceRequestsIds amounts to decreasing the while loop bound.
-                resolvedPriceRequestIds.push(pendingPriceRequestsIds[requestIndex]);
+                resolvedPriceRequestIds.push(
+                    pendingPriceRequestsIds[requestIndex]
+                );
                 _removeRequestFromPendingPriceRequestsIds(requestIndex);
                 emit RequestResolved(
                     request.lastVotingRound,
@@ -1061,7 +1331,12 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
 
             // If the roll count exceeds the threshold and the request is not governance then it is deletable.
             if (_shouldDeleteRequest(request.rollCount, request.isGovernance)) {
-                emit RequestDeleted(request.identifier, request.time, request.ancillaryData, request.rollCount);
+                emit RequestDeleted(
+                    request.identifier,
+                    request.time,
+                    request.ancillaryData,
+                    request.rollCount
+                );
                 delete priceRequests[pendingPriceRequestsIds[requestIndex]];
                 _removeRequestFromPendingPriceRequestsIds(requestIndex);
                 continue;
@@ -1069,7 +1344,12 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
             // Else, the request should be rolled. This involves only moving forward the lastVotingRound.
             request.lastVotingRound = getRoundIdToVoteOnRequest(currentRoundId);
             ++rounds[request.lastVotingRound].numberOfRequestsToVote;
-            emit RequestRolled(request.identifier, request.time, request.ancillaryData, request.rollCount);
+            emit RequestRolled(
+                request.identifier,
+                request.time,
+                request.ancillaryData,
+                request.rollCount
+            );
             requestIndex = unsafe_inc_64(requestIndex);
         }
 
@@ -1078,31 +1358,40 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
     }
 
     // Returns a price request status. A request is either: NotRequested, Active, Resolved, Future or ToDelete.
-    function _getRequestStatus(PriceRequest storage priceRequest, uint32 currentRoundId)
-        private
-        view
-        returns (RequestStatus)
-    {
-        if (priceRequest.lastVotingRound == 0) return RequestStatus.NotRequested;
+    function _getRequestStatus(
+        PriceRequest storage priceRequest,
+        uint32 currentRoundId
+    ) private view returns (RequestStatus) {
+        if (priceRequest.lastVotingRound == 0)
+            return RequestStatus.NotRequested;
         if (priceRequest.lastVotingRound < currentRoundId) {
             // Check if the request has already been resolved
-            VoteInstance storage voteInstance = priceRequest.voteInstances[priceRequest.lastVotingRound];
-            (bool isResolved, ) = _getResolvedPrice(voteInstance, priceRequest.lastVotingRound);
+            VoteInstance storage voteInstance = priceRequest.voteInstances[
+                priceRequest.lastVotingRound
+            ];
+            (bool isResolved, ) = _getResolvedPrice(
+                voteInstance,
+                priceRequest.lastVotingRound
+            );
             if (isResolved) return RequestStatus.Resolved;
-            if (_shouldDeleteRequest(_getActualRollCount(priceRequest, currentRoundId), priceRequest.isGovernance))
-                return RequestStatus.ToDelete;
+            if (
+                _shouldDeleteRequest(
+                    _getActualRollCount(priceRequest, currentRoundId),
+                    priceRequest.isGovernance
+                )
+            ) return RequestStatus.ToDelete;
             return RequestStatus.Active;
         }
-        if (priceRequest.lastVotingRound == currentRoundId) return RequestStatus.Active;
+        if (priceRequest.lastVotingRound == currentRoundId)
+            return RequestStatus.Active;
 
         return RequestStatus.Future; // Means than priceRequest.lastVotingRound > currentRoundId
     }
 
-    function _getResolvedPrice(VoteInstance storage voteInstance, uint256 lastVotingRound)
-        internal
-        view
-        returns (bool isResolved, int256 price)
-    {
+    function _getResolvedPrice(
+        VoteInstance storage voteInstance,
+        uint256 lastVotingRound
+    ) internal view returns (bool isResolved, int256 price) {
         return
             voteInstance.results.getResolvedPrice(
                 rounds[lastVotingRound].minParticipationRequirement,
@@ -1112,22 +1401,37 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
 
     // Gas optimized uint256 increment.
     function unsafe_inc(uint256 x) internal pure returns (uint256) {
-        unchecked { return x + 1; }
+        unchecked {
+            return x + 1;
+        }
     }
 
     // Gas optimized uint64 increment.
     function unsafe_inc_64(uint64 x) internal pure returns (uint64) {
-        unchecked { return x + 1; }
+        unchecked {
+            return x + 1;
+        }
     }
 
     // Gas optimized uint64 decrement.
     function unsafe_dec_64(uint64 x) internal pure returns (uint64) {
-        unchecked { return x - 1; }
+        unchecked {
+            return x - 1;
+        }
     }
 
     // Returns the registered identifier whitelist, stored in the finder.
-    function _getIdentifierWhitelist() private view returns (IdentifierWhitelistInterface) {
-        return IdentifierWhitelistInterface(finder.getImplementationAddress(OracleInterfaces.IdentifierWhitelist));
+    function _getIdentifierWhitelist()
+        private
+        view
+        returns (IdentifierWhitelistInterface)
+    {
+        return
+            IdentifierWhitelistInterface(
+                finder.getImplementationAddress(
+                    OracleInterfaces.IdentifierWhitelist
+                )
+            );
     }
 
     // Reverts if the contract has been migrated. Used in a modifier, defined as a private function for gas savings.
@@ -1137,24 +1441,36 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
 
     // Enforces that a calling contract is registered.
     function _requireRegisteredContract() private view {
-        RegistryInterface registry = RegistryInterface(finder.getImplementationAddress(OracleInterfaces.Registry));
-        require(registry.isContractRegistered(msg.sender) || msg.sender == migratedAddress, "Caller not registered");
+        RegistryInterface registry = RegistryInterface(
+            finder.getImplementationAddress(OracleInterfaces.Registry)
+        );
+        require(
+            registry.isContractRegistered(msg.sender) ||
+                msg.sender == migratedAddress,
+            "Caller not registered"
+        );
     }
 
     // Checks if a request should be deleted. A non-gevernance request should be deleted if it has been rolled more than
     // the maxRolls.
-    function _shouldDeleteRequest(uint256 rollCount, bool isGovernance) private view returns (bool) {
+    function _shouldDeleteRequest(
+        uint256 rollCount,
+        bool isGovernance
+    ) private view returns (bool) {
         return rollCount > maxRolls && !isGovernance;
     }
 
     // Returns the actual roll count of a request. This is the roll count plus the number of rounds that have passed
     // since the last voting round.
-    function _getActualRollCount(PriceRequest storage priceRequest, uint32 currentRoundId)
-        private
-        view
-        returns (uint32)
-    {
-        if (currentRoundId <= priceRequest.lastVotingRound) return priceRequest.rollCount;
-        return priceRequest.rollCount + currentRoundId - priceRequest.lastVotingRound;
+    function _getActualRollCount(
+        PriceRequest storage priceRequest,
+        uint32 currentRoundId
+    ) private view returns (uint32) {
+        if (currentRoundId <= priceRequest.lastVotingRound)
+            return priceRequest.rollCount;
+        return
+            priceRequest.rollCount +
+            currentRoundId -
+            priceRequest.lastVotingRound;
     }
 }
