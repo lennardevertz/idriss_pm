@@ -5,11 +5,7 @@ import {Ownable} from "solady/src/auth/Ownable.sol"; // Staker likely inherits O
 import {LibClone} from "solady/src/utils/LibClone.sol";
 
 import "./Staker.sol"; // Assuming Staker.sol is in the same directory
-import {
-    OnitInfiniteOutcomeDPM,
-    MarketConfig,
-    MarketInitData
-} from "../../../OnitInfiniteOutcomeDPM.sol"; // Adjusted path
+import {OnitInfiniteOutcomeDPM, MarketConfig, MarketInitData} from "../../../OnitInfiniteOutcomeDPM.sol"; // Adjusted path
 
 /**
  * @title VotingV2 contract - Refactored for Confidence-Based Prediction Market
@@ -110,8 +106,6 @@ contract VotingV2 is Staker {
      * @param outcomeUnit The unit size for outcome buckets in the DPM.
      * @param marketUri A URI pointing to additional metadata about the market/topic.
      * @param initialLiquidityABC Total amount of ABC tokens the creator commits to this topic's initial state.
-     * @param dpmSeedAmountETH The amount (in ETH equivalent) the DPM considers as `seededFunds` for initial shares.
-     *                         This is passed to the DPM but no actual ETH is sent for this parameter by VotingV2.
      * @param initialBucketIds Initial bucket IDs for seeding the market (DPM specific).
      * @param initialShares Corresponding initial shares for the bucket IDs (DPM specific).
      * @return marketAddress The address of the newly created Onit DPM market for the topic.
@@ -122,7 +116,6 @@ contract VotingV2 is Staker {
         int256 outcomeUnit,
         string memory marketUri,
         uint256 initialLiquidityABC,
-        uint256 dpmSeedAmountETH, // New parameter
         int256[] memory initialBucketIds,
         int256[] memory initialShares
     ) external returns (address marketAddress) {
@@ -136,8 +129,6 @@ contract VotingV2 is Staker {
         if (initialLiquidityABC == 0) {
             revert InsufficientCreatorStake();
         }
-        // Note: dpmSeedAmountETH could be 0 if there are no initial shares,
-        // or it could be > 0. If >0, this will lead to a negative initialBetValue in DPM.
 
         address[] memory dpmResolvers = new address[](1);
         dpmResolvers[0] = address(this);
@@ -155,17 +146,14 @@ contract VotingV2 is Staker {
 
         // CRITICAL: The DPM's initialize function calculates:
         // `initialBetValue = msg.value - initData.seededFunds;`
-        // We are calling with `msg.value = 0`.
-        // We set `initData.seededFunds = dpmSeedAmountETH`.
-        // Therefore, `initialBetValue` will be `0 - dpmSeedAmountETH = -dpmSeedAmountETH` inside the DPM.
-        // If dpmSeedAmountETH > 0, initialBetValue will be negative.
-        // This WILL FAIL the DPM's `initialBetValue < MIN_BET_SIZE` check (currently `1 ether`),
-        // as MIN_BET_SIZE is positive and a negative value is less than any positive value.
+        // We are calling with `msg.value = 0`. This will be updated using some staked amount input from the market creator
+        // so the initialization doesnt require msg.value.
+        // We set `initData.seededFunds = 0`.
         // The OnitInfiniteOutcomeDPM contract needs modification to handle this.
         MarketInitData memory marketInitData = MarketInitData({
             onitFactory: address(this),
             initiator: initiator,
-            seededFunds: dpmSeedAmountETH, // DPM's ETH-based seededFunds.
+            seededFunds: 0, // DPM's ETH-based seededFunds.
             config: marketConfig,
             initialBucketIds: initialBucketIds,
             initialShares: initialShares
@@ -177,15 +165,13 @@ contract VotingV2 is Staker {
         );
 
         // Salt includes parameters that define the market's uniqueness.
-        // Adding dpmSeedAmountETH to ensure different seedings result in different addresses if desired.
         bytes32 salt = keccak256(
             abi.encode(
                 address(this),
                 initiator,
                 marketConfig.bettingCutoff,
                 marketConfig.marketQuestion,
-                initialLiquidityABC, // Creator's total ABC commitment
-                dpmSeedAmountETH     // DPM's view of seeded funds (ETH equiv)
+                initialLiquidityABC // Creator's total ABC commitment
             )
         );
 
@@ -215,10 +201,12 @@ contract VotingV2 is Staker {
         if (checkOnitFactory != address(this)) {
             revert FailedToInitializeTopicMarket();
         }
-        
+
         marketAddress = clonedMarketAddress;
         // topicId should be unique based on defining parameters.
-        bytes32 topicId = keccak256(abi.encodePacked(marketQuestion, initialLiquidityABC, dpmSeedAmountETH));
+        bytes32 topicId = keccak256(
+            abi.encodePacked(marketQuestion, initialLiquidityABC)
+        );
 
         topicsMarketAddress[topicId] = marketAddress;
         topicConfigs[topicId] = marketConfig;
@@ -226,7 +214,7 @@ contract VotingV2 is Staker {
         OnitInfiniteOutcomeDPM(payable(marketAddress)).initializeVotinContract(
             address(this)
         );
-        
+
         // TODO: Formally "lock" or account for `initialLiquidityABC` from `initiator`'s balance.
 
         emit TopicCreated(
@@ -246,15 +234,13 @@ contract VotingV2 is Staker {
      * @param marketQuestion The unique question or identifier for the topic.
      * @param marketBettingCutoff Timestamp when betting for the topic will close.
      * @param initialLiquidityABC Total amount of ABC tokens the creator commits.
-     * @param dpmSeedAmountETH The amount (in ETH equivalent) the DPM considers as `seededFunds`.
      * @return address The predicted address of the Onit DPM market.
      */
     function predictTopicMarketAddress(
         address initiator,
         string memory marketQuestion,
         uint256 marketBettingCutoff,
-        uint256 initialLiquidityABC, // Added for consistency with createTopic salt
-        uint256 dpmSeedAmountETH    // New parameter
+        uint256 initialLiquidityABC // Added for consistency with createTopic salt
     ) public view returns (address) {
         if (onitDPMImplementation == address(0)) {
             revert OnitDPMImplementationNotSet();
@@ -266,8 +252,7 @@ contract VotingV2 is Staker {
                 initiator,
                 marketBettingCutoff,
                 marketQuestion,
-                initialLiquidityABC, // Added
-                dpmSeedAmountETH     // Added
+                initialLiquidityABC
             )
         );
 
