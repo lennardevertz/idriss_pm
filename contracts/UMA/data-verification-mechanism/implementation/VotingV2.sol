@@ -548,6 +548,14 @@ contract VotingV2 is Staker {
      * (Overrides and new logic for rewards/slashing) *
      ****************************************/
 
+    /* @notice Updates the voter's trackers for staking and slashing. Applies all unapplied slashing to given staker.
+     * @dev Can be called by anyone, but it is not necessary for the contract to function is run the other functions.
+     * @param voter address of the voter to update the trackers for.
+     */
+    function updateTrackers(address voter) external {
+        _updateTrackers(voter);
+    }
+
     /**
      * @notice Updates the staker's trackers for staking and applies rewards/slashing from closed topics.
      * @dev This function is intended to be repurposed from its UMA DVM functionality.
@@ -593,7 +601,10 @@ contract VotingV2 is Staker {
      * @param staker The address of the user.
      * @param maxTraversals The maximum number of topics to process in this call.
      */
-    function _updateUserTopicResults(address staker, uint64 maxTraversals) internal {
+    function _updateUserTopicResults(
+        address staker,
+        uint64 maxTraversals
+    ) internal {
         uint256 topicsProcessed = 0;
         bytes32[] storage participatedTopics = userParticipatedTopicIds[staker];
 
@@ -605,7 +616,9 @@ contract VotingV2 is Staker {
             }
 
             bytes32 topicId = participatedTopics[i];
-            TopicParticipation storage participation = userTopicParticipation[topicId][staker];
+            TopicParticipation storage participation = userTopicParticipation[
+                topicId
+            ][staker];
 
             // Check if topic is settled and not yet claimed by this user for this topic
             if (
@@ -614,7 +627,7 @@ contract VotingV2 is Staker {
             ) {
                 // --- 1. Get DPM Aggregated Results ---
                 // This is HYPOTHETICAL. DPM needs to expose this.
-                // Example: (int256 mean, int256 stdDev) = 
+                // Example: (int256 mean, int256 stdDev) =
                 //     OnitInfiniteOutcomeDPM(payable(topicsMarketAddress[topicId])).getAggregatedOutcome();
                 // For now, we'll use placeholder values.
                 bool wasInBand; // Placeholder for actual calculation
@@ -623,10 +636,11 @@ contract VotingV2 is Staker {
                 // This logic is complex and depends on how the DPM stores user positions
                 // and how "in-band" is defined.
                 // wasInBand = _calculateUserInBandStatus(topicId, staker, mean, stdDev); // Hypothetical
-                
+
                 // Placeholder logic: Randomly decide for now for structure
                 // In a real scenario, this would be a deterministic calculation.
-                if (block.timestamp % 2 == 0) { // Replace with actual logic
+                if (block.timestamp % 2 == 0) {
+                    // Replace with actual logic
                     wasInBand = true;
                 } else {
                     wasInBand = false;
@@ -639,7 +653,7 @@ contract VotingV2 is Staker {
                 if (wasInBand) {
                     // Placeholder: Reward is 10% of their stake on this topic.
                     // Real reward logic is complex (pro-rata of slashed amounts).
-                    uint256 rewardAmount = (userStakeForTopic * 10) / 100; 
+                    uint256 rewardAmount = (userStakeForTopic * 10) / 100;
                     vs.outstandingRewards += SafeCast.toUint128(rewardAmount);
                     emit UserTopicRewardApplied(topicId, staker, rewardAmount);
                 } else {
@@ -649,14 +663,19 @@ contract VotingV2 is Staker {
                         if (SafeCast.toUint128(slashAmount) > vs.stake) {
                             // Cannot slash more than they have globally.
                             // This implies their stake on this topic was a significant portion of a now-reduced global stake.
-                            slashAmount = vs.stake; 
+                            slashAmount = vs.stake;
                         }
-                        
-                        if (slashAmount > 0) { // Re-check after potential cap
+
+                        if (slashAmount > 0) {
+                            // Re-check after potential cap
                             vs.stake -= SafeCast.toUint128(slashAmount);
                             // Also update cumulativeStake in the Staker contract
                             cumulativeStake -= SafeCast.toUint128(slashAmount);
-                            emit UserTopicSlashApplied(topicId, staker, slashAmount);
+                            emit UserTopicSlashApplied(
+                                topicId,
+                                staker,
+                                slashAmount
+                            );
                         }
                     }
                 }
