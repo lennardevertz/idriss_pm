@@ -505,6 +505,7 @@ contract VotingV2 is Staker {
      * @notice Advances the phase of a topic, e.g., from AcceptingConfidence to AggregatingResults.
      * @dev This is a basic version. Conditions for phase transitions need to be robustly defined,
      *      especially for AggregatingResults -> Settled, which depends on DPM outcome finalization.
+     *      This function is expected to be called externally, e.g., by a keeper.
      * @param topicId The ID of the topic to advance.
      */
     function tryAdvanceTopicPhase(bytes32 topicId) external {
@@ -515,6 +516,7 @@ contract VotingV2 is Staker {
         OnitInfiniteOutcomeDPM.MarketConfig storage config = topicConfigs[
             topicId
         ];
+        address marketAddress = topicsMarketAddress[topicId]; // Get market address
 
         if (currentPhase == TopicPhase.AcceptingConfidence) {
             if (
@@ -523,22 +525,44 @@ contract VotingV2 is Staker {
             ) {
                 topicPhase[topicId] = TopicPhase.AggregatingResults;
                 emit TopicPhaseChanged(topicId, TopicPhase.AggregatingResults);
-                // TODO: Trigger aggregation on DPM if needed.
-                // This might involve calling a function on the DPM to resolve/finalize its state
-                // based on all submitted (conceptual) shares. The DPM's `resolveMarket`
-                // currently expects a single `_resolvedOutcome`. For confidence aggregation,
-                // the DPM would need to calculate mean/std.dev from its own state.
+
+                // HYPOTHETICAL: Tell DPM to finalize its internal calculations if needed.
+                // This depends on DPM design. It might auto-finalize or need a trigger.
+                // Example:
+                // try OnitInfiniteOutcomeDPM(payable(marketAddress)).startAggregation() {}
+                // catch { /* Handle error if DPM fails to start aggregation */ }
             }
         } else if (currentPhase == TopicPhase.AggregatingResults) {
-            // TODO: Define condition for moving to Settled.
-            // This typically means the DPM has finalized its calculations (mean, std_dev)
-            // and these results are available for VotingV2 to use for rewards/slashing.
+            // Condition for moving to Settled: DPM aggregation is complete.
+            // HYPOTHETICAL: Check if DPM has finished its calculations.
+            bool dpmAggregationComplete = false; // Default to false
             // Example:
-            // bool dpmResultsAreFinal = OnitInfiniteOutcomeDPM(payable(topicsMarketAddress[topicId])).isAggregationComplete(); // Hypothetical
-            // if (dpmResultsAreFinal) {
-            //     topicPhase[topicId] = TopicPhase.Settled;
-            //     emit TopicPhaseChanged(topicId, TopicPhase.Settled);
-            // }
+            // try OnitInfiniteOutcomeDPM(payable(marketAddress)).isAggregationComplete() returns (bool complete) {
+            //     dpmAggregationComplete = complete;
+            // } catch { /* Handle error if DPM check fails */ }
+
+            // For now, let's assume if it's in AggregatingResults, and some time has passed,
+            // or a DPM flag is set, it can move to Settled.
+            // This is a placeholder for a real condition.
+            // For testing, one might allow an owner to push it to Settled, or use a DPM flag.
+            // If DPM emits an event "AggregationCompleted", an off-chain keeper could call this.
+
+            // For the purpose of this exercise, let's assume a DPM view function.
+            // If `OnitInfiniteOutcomeDPM` has a `resolvedAtTimestamp` which is set when its internal
+            // aggregation is done (similar to its current `resolveMarket`), we could check that.
+            // The current DPM's `resolvedAtTimestamp` is set by `resolveMarket`.
+            // We need an equivalent for confidence aggregation.
+            // Let's assume a hypothetical `aggregationFinalizedTimestamp` on the DPM.
+            uint256 dpmFinalizedTime = OnitInfiniteOutcomeDPM(payable(marketAddress)).resolvedAtTimestamp(); // Using existing field as placeholder
+
+            if (dpmFinalizedTime > 0 && dpmFinalizedTime >= config.bettingCutoff) { // Ensure it was finalized after betting
+                dpmAggregationComplete = true; // Placeholder logic
+            }
+
+            if (dpmAggregationComplete) {
+                topicPhase[topicId] = TopicPhase.Settled;
+                emit TopicPhaseChanged(topicId, TopicPhase.Settled);
+            }
         }
         // Other phase transitions can be added as needed.
     }
