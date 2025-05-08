@@ -77,6 +77,16 @@ contract VotingV2 is Staker {
         uint256 newTotalUserStakeForTopic // New field: user's new total stake for this topic
     );
     event TopicPhaseChanged(bytes32 indexed topicId, TopicPhase newPhase);
+    event UserTopicRewardApplied(
+        bytes32 indexed topicId,
+        address indexed user,
+        uint256 rewardAmount
+    );
+    event UserTopicSlashApplied(
+        bytes32 indexed topicId,
+        address indexed user,
+        uint256 slashAmount
+    );
 
     /****************************************
      *                ERRORS                *
@@ -547,14 +557,10 @@ contract VotingV2 is Staker {
      * @param staker address of the staker to update the trackers for.
      */
     function _updateTrackers(address staker) internal override {
-        // TODO: Implement new tracker logic:
-        // 1. Iterate through topics `staker` participated in that are now in `Settled` phase using `userParticipatedTopicIds[staker]`.
-        // 2. For each such topic, fetch the outcome (mean, std_dev) from the DPM or this contract.
-        // 3. Fetch the staker's participation (totalStakeAmountABC) from `userTopicParticipation`.
-        // 4. Determine if in-band or out-of-band (requires DPM to expose user's effective score/position).
-        // 5. Calculate rewards or slashes based on the new system's rules.
-        // 6. Update Staker's accounting (e.g., `voterStake.outstandingRewards` or apply slashes).
-        // 7. Mark `userTopicParticipation[topicId][staker].rewardClaimed = true`.
+        // Process settled topics for rewards/slashes before updating Staker's core rewards.
+        // Use a reasonable default for maxTraversals, e.g., 5 or 10.
+        // This could also be a configurable value.
+        _updateUserTopicResults(staker, 5); // Process up to 5 topics
 
         // For now, just call super to maintain Staker's core accounting (emissions).
         super._updateTrackers(staker);
@@ -578,31 +584,106 @@ contract VotingV2 is Staker {
         // Staker._incrementPendingStake is not called.
     }
 
+    /****************************************
+     *        SETTLEMENT LOGIC              *
+     ****************************************/
+
     /**
-     * @notice Updates a staker's rewards/slashes based on their participation in closed topics.
-     * @dev This function is intended to be repurposed from UMA's `_updateAccountSlashingTrackers`.
-     *      It will process a batch of closed topics for a given staker.
-     * @param staker address of the staker.
-     * @param maxTraversals maximum number of topics to process in this call (for gas management).
+     * @dev Processes settled topics for a user, applying rewards or slashes.
+     * @param staker The address of the user.
+     * @param maxTraversals The maximum number of topics to process in this call.
      */
-    function _updateAccountRewardsAndSlashes(
-        address staker,
-        uint64 maxTraversals
-    ) internal {
-        // Silence unused variable warnings until implemented
-        staker = staker;
-        maxTraversals = maxTraversals;
-        // TODO: Implement logic to iterate through relevant topics for the staker.
-        // - Identify topics the staker participated in which are `Settled` and not yet `rewardClaimed`
-        //   using `userParticipatedTopicIds[staker]` and `userTopicParticipation`.
-        // - For each topic (up to maxTraversals):
-        //   - Get topic result (mean, std_dev from DPM or stored in this contract).
-        //   - Get staker's participation for that topic from `userTopicParticipation`.
-        //   - Calculate if in-band/out-of-band.
-        //   - Calculate reward/slashing amount.
-        //   - Update staker's claimable rewards or apply slashes using Staker's accounting functions.
-        //   - Mark `userTopicParticipation[topicId][staker].rewardClaimed = true`.
+    function _updateUserTopicResults(address staker, uint64 maxTraversals) internal {
+        uint256 topicsProcessed = 0;
+        bytes32[] storage participatedTopics = userParticipatedTopicIds[staker];
+
+        // Iterate backwards or manage an index to avoid issues if elements are removed/reordered (not the case here).
+        // For simplicity, iterating forwards. Consider a separate index for `nextTopicToProcessForUser` if many topics.
+        for (uint i = 0; i < participatedTopics.length; i++) {
+            if (topicsProcessed >= maxTraversals) {
+                break;
+            }
+
+            bytes32 topicId = participatedTopics[i];
+            TopicParticipation storage participation = userTopicParticipation[topicId][staker];
+
+            // Check if topic is settled and not yet claimed by this user for this topic
+            if (
+                topicPhase[topicId] == TopicPhase.Settled &&
+                !participation.rewardClaimed
+            ) {
+                // --- 1. Get DPM Aggregated Results ---
+                // This is HYPOTHETICAL. DPM needs to expose this.
+                // Example: (int256 mean, int256 stdDev) = 
+                //     OnitInfiniteOutcomeDPM(payable(topicsMarketAddress[topicId])).getAggregatedOutcome();
+                // For now, we'll use placeholder values.
+                bool wasInBand; // Placeholder for actual calculation
+
+                // --- 2. Calculate User's "Score" / In-Band Status ---
+                // This logic is complex and depends on how the DPM stores user positions
+                // and how "in-band" is defined.
+                // wasInBand = _calculateUserInBandStatus(topicId, staker, mean, stdDev); // Hypothetical
+                
+                // Placeholder logic: Randomly decide for now for structure
+                // In a real scenario, this would be a deterministic calculation.
+                if (block.timestamp % 2 == 0) { // Replace with actual logic
+                    wasInBand = true;
+                } else {
+                    wasInBand = false;
+                }
+
+                // --- 3. Determine Reward/Slashing ---
+                uint256 userStakeForTopic = participation.totalStakeAmountABC;
+                VoterStake storage vs = voterStakes[staker]; // Staker's global stake struct
+
+                if (wasInBand) {
+                    // Placeholder: Reward is 10% of their stake on this topic.
+                    // Real reward logic is complex (pro-rata of slashed amounts).
+                    uint256 rewardAmount = (userStakeForTopic * 10) / 100; 
+                    vs.outstandingRewards += SafeCast.toUint128(rewardAmount);
+                    emit UserTopicRewardApplied(topicId, staker, rewardAmount);
+                } else {
+                    // Placeholder: Slash is 5% of their stake on this topic.
+                    uint256 slashAmount = (userStakeForTopic * 5) / 100;
+                    if (slashAmount > 0) {
+                        if (SafeCast.toUint128(slashAmount) > vs.stake) {
+                            // Cannot slash more than they have globally.
+                            // This implies their stake on this topic was a significant portion of a now-reduced global stake.
+                            slashAmount = vs.stake; 
+                        }
+                        
+                        if (slashAmount > 0) { // Re-check after potential cap
+                            vs.stake -= SafeCast.toUint128(slashAmount);
+                            // Also update cumulativeStake in the Staker contract
+                            cumulativeStake -= SafeCast.toUint128(slashAmount);
+                            emit UserTopicSlashApplied(topicId, staker, slashAmount);
+                        }
+                    }
+                }
+
+                participation.rewardClaimed = true;
+                topicsProcessed++;
+            }
+        }
     }
+
+    // --- Placeholder for actual in-band calculation ---
+    // function _calculateUserInBandStatus(
+    //     bytes32 topicId,
+    //     address user,
+    //     int256 topicMean,
+    //     int256 topicStdDev
+    // ) internal view returns (bool) {
+    //     // 1. Get user's effective submission/position from the DPM for this topic.
+    //     //    This is a major missing piece as VotingV2 doesn't store this, DPM does.
+    //     //    DPM needs to expose `getUserPosition(topicId, user) -> (user_mean_vote, user_confidence_metric)`
+    //
+    //     // 2. Compare user's position with topicMean +/- topicStdDev.
+    //     // Example:
+    //     // int256 userEffectiveScore = IDPM(topicsMarketAddress[topicId]).getUserEffectiveScore(user);
+    //     // return (userEffectiveScore >= topicMean - topicStdDev && userEffectiveScore <= topicMean + topicStdDev);
+    //     return false; // Placeholder
+    // }
 
     /****************************************
      *            VIEW FUNCTIONS            *
