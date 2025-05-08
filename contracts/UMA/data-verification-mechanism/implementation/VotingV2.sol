@@ -195,7 +195,6 @@ contract VotingV2 is Staker {
             // It's recorded in userTopicParticipation when/if the creator also makes a formal "submission"
             // or if seeding itself is considered their first submission.
             // The DPM will need to be adapted to use this initialLiquidityABC.
-
         } else {
             // No initial shares, initialLiquidityABC should ideally be 0 unless DPM has other uses for it.
             if (initialLiquidityABC != 0) {
@@ -410,12 +409,15 @@ contract VotingV2 is Staker {
             revert InvalidBucketOrShareData();
         }
 
-        // 5. Check available stake (user's full global stake can back this additional amount)
-        uint256 availableStake = _getAvailableStake(user);
-        if (additionalStakeAmountABC > availableStake) {
+        // 5. Check available stake for this specific topic
+        uint256 availableForThisTopic = getAvailableStakeForTopic(
+            topicId,
+            user
+        );
+        if (additionalStakeAmountABC > availableForThisTopic) {
             revert InsufficientAvailableStake(
                 additionalStakeAmountABC,
-                availableStake
+                availableForThisTopic
             );
         }
 
@@ -600,6 +602,31 @@ contract VotingV2 is Staker {
         //   - Calculate reward/slashing amount.
         //   - Update staker's claimable rewards or apply slashes using Staker's accounting functions.
         //   - Mark `userTopicParticipation[topicId][staker].rewardClaimed = true`.
+    }
+
+    /****************************************
+     *            VIEW FUNCTIONS            *
+     ****************************************/
+
+    /**
+     * @notice Returns the remaining amount of ABC a user can additionally stake on a specific topic
+     *         before their total stake on that topic reaches their global stake limit.
+     * @param topicId The ID of the topic.
+     * @param user The address of the user.
+     * @return uint256 The available ABC amount that can still be staked on this topic by the user.
+     */
+    function getAvailableStakeForTopic(
+        bytes32 topicId,
+        address user
+    ) public view returns (uint256) {
+        uint256 globalStake = _getAvailableStake(user); // User's total global stake
+        uint256 currentStakeOnTopic = userTopicParticipation[topicId][user]
+            .totalStakeAmountABC;
+
+        if (globalStake <= currentStakeOnTopic) {
+            return 0; // Already staked up to or beyond global limit for this topic
+        }
+        return globalStake - currentStakeOnTopic;
     }
 
     /****************************************
