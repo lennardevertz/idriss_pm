@@ -113,12 +113,10 @@ contract OnitInfiniteOutcomeDPM is
     uint256 public constant PROTOCOL_COMMISSION_BP = 400;
     /// Maximum market creator commission rate (4%) - Note: docs.txt says no market creator fee
     uint256 public constant MAX_MARKET_CREATOR_COMMISSION_BP = 400;
-    /// The minimum bet size (ETH denominated, will be removed/ignored for virtual ABC)
-    /// For virtual ABC, this should be in ABC units (e.g., 1 * 10**18 for 1 ABC token if 18 decimals)
-    uint256 public constant MIN_BET_SIZE = 1 ether; // To be removed or adapted for ABC units
-    /// The maximum bet size (ETH denominated, will be removed/ignored for virtual ABC)
-    /// For virtual ABC, this should be in ABC units
-    uint256 public constant MAX_BET_SIZE = 1_000_000 ether; // To be removed or adapted for ABC units
+    /// The minimum bet size in ABC token units (e.g., 1 * 10**18 for 1 ABC token if ABC has 18 decimals).
+    uint256 public constant MIN_BET_SIZE = 1 * 10**18; // Assuming 1 ABC token (18 decimals)
+    /// The maximum bet size in ABC token units (e.g., 1,000,000 * 10**18 for 1,000,000 ABC tokens if ABC has 18 decimals).
+    uint256 public constant MAX_BET_SIZE = 1_000_000 * 10**18; // Assuming 1,000,000 ABC tokens (18 decimals)
     /// The version of the market
     string public constant VERSION = "0.0.2";
 
@@ -182,6 +180,11 @@ contract OnitInfiniteOutcomeDPM is
 
         // Prevents the implementation from being initialized
         if (marketVoided) revert AlreadyInitialized();
+
+        // Apply MIN_BET_SIZE and MAX_BET_SIZE checks to the virtual initialBetValueABC.
+        // These constants MUST be defined in ABC token units (e.g., considering ABC's decimals).
+        if (initialBetValueABC < MIN_BET_SIZE || initialBetValueABC > MAX_BET_SIZE)
+            revert BetValueOutOfBounds();
 
         if (
             initData.config.bettingCutoff != 0 &&
