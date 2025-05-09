@@ -41,24 +41,26 @@ Flow:
      - Define a “confidence band” (e.g. ±1σ around mean).
 
 4. Payout & Slashing:
-   - Users inside the band are rewarded in token ABC proportionally to their stake.
-   - Users outside the band are slashed (e.g. 0.05%) from their staked ABC tokens.
-   - Rewards and slashing are applied based on position and stake as well as time of submission.
+   - Based on the DPM's aggregated confidence band (mean ± σ), `VotingV2` (the staking contract) determines if a user's submission was in-band or out-of-band.
+   - Users inside the band are eligible for rewards. Rewards are a pro-rata share of tokens from out-of-band users.
+   - Users outside the band have a portion of their staked ABC (for that topic) accounted for as slashed within `VotingV2`.
+   - This accounting happens lazily when a user's trackers are updated in `VotingV2`. The DPM itself does not handle ABC token transfers for rewards/slashes.
+   - `VotingV2`'s reward calculation logic can incorporate time-weighting to discourage last-minute band-chasing.
 
 Key Mechanics
 
     - UMA is only used for source collection via the optimistic oracle. The confidence
       market (aggregation & settlement) is fully on-chain and does not call the DVM or OO.
-    - Users must stake ABC in a global staking contract (same model as UMA DVM 2.0). While actively staked:
-      • They may submit confidence scores on any topic.
-      • Stakes earn pro-rata emissions per block (rate set by governance).
-      • Stakes are slashed (~0.1% per missed or out-of-band submission) and those slashed tokens
-        are immediately redistributed to in-band stakers, pro-rata by stake size & submission timestamp.
+    - Users must stake ABC in a global staking contract (`VotingV2`). While actively staked:
+      • They may submit confidence scores on any topic. The DPM interaction is virtual; no ABC tokens are transferred to the DPM. The DPM trusts `VotingV2` regarding the stake amount associated with a submission.
+      • Stakes earn pro-rata emissions per block (rate set by governance), managed by `VotingV2`.
+      • For out-of-band submissions on a topic, a portion of the user's ABC stake committed to that topic is accounted as slashed within `VotingV2`. This accounting occurs when the user's trackers are updated.
+      • These accounted-for "slashed" amounts form a pool within `VotingV2` that is then distributed as rewards to in-band stakers for that topic, pro-rata by their stake size & submission timestamp (logic within `VotingV2`).
       • Initiating an unstake triggers a 7-day cooldown during which that stake cannot submit scores or be withdrawn.
     - The contract emits view functions per topic: current phase, time remaining, submissions, and aggregates.
-    - All confidence data is handled by the smart contract.
-    - Confidence scores are aggregated automatically on-chain.
-    - Rewards discourage last-minute band-chasing by weighting earlier inputs more.
+    - User share distribution data (from `bucketIds` and `shares`) is managed by the DPM. `VotingV2` tracks the total ABC amount staked per user per topic.
+    - Confidence scores are aggregated automatically on-chain by the DPM to produce a mean and standard deviation.
+    - `VotingV2`'s reward calculation logic can incorporate time-weighting to discourage last-minute band-chasing.
 
 Governance & parameter configurability
     - Global governance sets protocol-wide defaults (e.g. UMA bond size, slashing %, emission rate).

@@ -14,7 +14,7 @@
 1.2 Asset & Position Model
   - Onit: Bets in native ETH, positions represented by ERC1155 NFTs, protocol & creator fees in ETH.
   - Planned: Global ERC20 (ABC) staking contract; stakes earn emissions; slashing & rewards in ABC.
-  - Virtual payment model: staking amounts act as theoretical cost inputs—no token transfer on share issuance; actual ABC transfers occur only during reward/slashing settlement.
+  - Virtual payment model: Staking amounts from `VotingV2` act as theoretical cost inputs to the DPM. No ABC tokens are transferred to or from the DPM during confidence submissions (votes). The DPM trusts `VotingV2` that these amounts are backed by the user's global stake. Actual ABC token accounting for rewards and slashes is handled entirely within `VotingV2` (the staking contract) during settlement.
   - ABC staking contract design can reuse UMA’s staking contract implementation almost verbatim.
 
 1.3 Oracle & Resolution
@@ -41,7 +41,7 @@
 
 - Adapt and integrate Onit DPM modules:
    • Keep OnitInfiniteOutcomeDPMMechanism & OutcomeDomain for cost math and share tracking.
-   • Swap ETH payment flows to ABC.token.transferFrom and use stake as cost input.
+   • Adapt DPM to accept stake amount as a parameter from `VotingV2` for its cost calculations, without actual token transfer to the DPM. The DPM will trust `VotingV2` for this amount.
    • Remove only unused proxy/factory code if no longer needed.
    • Remove NFT mint/burn hooks, TraderStake struct and ERC1155 dependencies as ABC staking replaces per‐market NFT positions.
 - Design & deploy new Topic + Submission structs/mappings; also eliminate all NFT-related state (TraderStake, nftId) and ERC1155 imports.
