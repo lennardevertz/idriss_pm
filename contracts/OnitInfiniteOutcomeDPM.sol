@@ -30,7 +30,7 @@ contract OnitInfiniteOutcomeDPM is
     error BettingCutoffOutOfBounds();
     error MarketCreatorCommissionBpOutOfBounds();
     /// Trading Errors
-    error BettingCutoffPassed();
+    error BettingCutoffPassedOrMarketNotOpen();
     error BetValueOutOfBounds();
     error IncorrectBetValue(int256 expected, uint256 actual);
     error InvalidSharesValue();
@@ -55,12 +55,12 @@ contract OnitInfiniteOutcomeDPM is
     );
     /// Trading Events
     event BoughtShares(
-        address indexed predictor,
+        address indexed trader, // Changed from predictor to trader for clarity with actualUser
         int256 costDiff,
         int256 newTotalQSquared
     );
     event SoldShares(
-        address indexed predictor,
+        address indexed trader, // Changed from predictor to trader
         int256 costDiff,
         int256 newTotalQSquared
     );
@@ -88,9 +88,6 @@ contract OnitInfiniteOutcomeDPM is
     }
 
     // Total amount the trader has bet across all predictions
-    mapping(address trader => uint256) public votingPower;
-
-    // Total amount the trader has bet across all predictions
     mapping(address trader => TraderStake stake) public tradersStake;
 
     /// Timestamp after which no more bets can be placed (0 = no cutoff)
@@ -112,14 +109,14 @@ contract OnitInfiniteOutcomeDPM is
     /// The question traders are predicting
     string public marketQuestion;
 
-    /// Protocol commission rate in basis points of 10000 (400 = 4%)
+    /// Protocol commission rate in basis points of 10000 (400 = 4%) - Will be re-evaluated if DPM holds no tokens
     uint256 public constant PROTOCOL_COMMISSION_BP = 400;
-    /// Maximum market creator commission rate (4%)
+    /// Maximum market creator commission rate (4%) - Note: docs.txt says no market creator fee
     uint256 public constant MAX_MARKET_CREATOR_COMMISSION_BP = 400;
-    /// The minimum bet size
-    uint256 public constant MIN_BET_SIZE = 1 ether;
-    /// The maximum bet size
-    uint256 public constant MAX_BET_SIZE = 1_000_000 ether;
+    /// The minimum bet size (ETH denominated, will be removed/ignored for virtual ABC)
+    uint256 public constant MIN_BET_SIZE = 1 ether; // To be removed or adapted
+    /// The maximum bet size (ETH denominated, will be removed/ignored for virtual ABC)
+    uint256 public constant MAX_BET_SIZE = 1_000_000 ether; // To be removed or adapted
     /// The version of the market
     string public constant VERSION = "0.0.2";
 
@@ -175,12 +172,12 @@ contract OnitInfiniteOutcomeDPM is
      * @param initData The market initialization data
      */
     function initialize(MarketInitData memory initData) external payable {
-        uint256 initialBetValue = msg.value - initData.seededFunds;
+        // For virtual ABC model, msg.value will be 0. initData.seededFunds is also 0 from VotingV2.
+        // The true "initial value" comes from initialLiquidityABC managed by VotingV2.
+        // uint256 initialBetValue = msg.value - initData.seededFunds; // This becomes 0
 
         // Prevents the implementation from being initialized
         if (marketVoided) revert AlreadyInitialized();
-        if (initialBetValue < MIN_BET_SIZE || initialBetValue > MAX_BET_SIZE)
-            revert BetValueOutOfBounds();
         // If cutoff is set, it must be greater than now
         if (
             initData.config.bettingCutoff != 0 &&
@@ -202,11 +199,25 @@ contract OnitInfiniteOutcomeDPM is
             initData.config.resolvers
         );
 
+        // Calculate the cost of initial shares, if any. This cost is what VotingV2's initialLiquidityABC covers.
+        int256 costOfInitialShares = 0;
+        if (initData.initialBucketIds.length > 0) {
+            // This calculation should ideally use the DPM's own mechanism state (kappa)
+            // For now, assuming calculateCostOfTrade can be called statically or on an uninitialized state
+            // if it only depends on kappa (which is constant in OnitInfiniteOutcomeDPMMechanism)
+            // and the provided shares/buckets.
+            (costOfInitialShares, ) = calculateCostOfTrade(
+                initData.initialBucketIds,
+                initData.initialShares
+            );
+            // VotingV2 already validates that initialLiquidityABC == uint256(costOfInitialShares)
+        }
+
         // Initialize Infinite Outcome DPM
         _initializeInfiniteOutcomeDPM(
             initData.initiator,
             initData.config.outcomeUnit,
-            int256(initialBetValue),
+            costOfInitialShares, // The "initial bet value" is the cost of the initial shares for the mechanism.
             initData.initialShares,
             initData.initialBucketIds
         );
@@ -220,9 +231,9 @@ contract OnitInfiniteOutcomeDPM is
         // Set market creator commission rate
         marketCreatorCommissionBp = initData.config.marketCreatorCommissionBp;
 
-        // Update the traders stake
+        // Update the traders stake with the virtual ABC amount (cost of initial shares)
         tradersStake[initData.initiator] = TraderStake({
-            totalStake: initialBetValue
+            totalStake: uint256(costOfInitialShares) // This is in virtual ABC units
         });
 
         emit MarketInitialized(initData.initiator, msg.value);
@@ -383,50 +394,57 @@ contract OnitInfiniteOutcomeDPM is
     // ----------------------------------------------------------------
 
     /**
-     * @notice Buy shares in the market for a given outcomes
-     *
-     * @dev Voter specifies the outcome outcome tokens they want exposure to
-     *
-     * @param bucketIds The bucket IDs for the voter's prediction
-     * @param shares The shares for the voter's prediction
+     * @notice Executes a trade (buy/sell shares) for a user, funded by virtual ABC tokens.
+     * @dev Called by `VotingV2` (the `votinContractAddress`). `VotingV2` is responsible for
+     *      validating that `costABC` matches the DPM's calculated cost for the trade and
+     *      that the `actualUser` has sufficient backing stake in `VotingV2`.
+     * @param actualUser The end-user performing the trade.
+     * @param costABC The amount of virtual ABC tokens representing the cost of this trade.
+     * @param bucketIds The bucket IDs for the trade.
+     * @param shares The shares for the trade (positive for buy, negative for sell).
      */
-    function vote(
+    function executeTradeForUser(
+        // Renamed from vote
+        address actualUser,
+        uint256 costABC,
         int256[] memory bucketIds,
         int256[] memory shares
     ) external onlyVotingContract {
         if (bettingCutoff != 0 && block.timestamp > bettingCutoff)
-            revert BettingCutoffPassed();
+            revert BettingCutoffPassedOrMarketNotOpen(); // Adjusted error name
         if (resolvedAtTimestamp != 0) revert MarketIsResolved();
         if (marketVoided) revert MarketIsVoided();
-        if (
-            votingPower[msg.sender] < MIN_BET_SIZE ||
-            votingPower[msg.sender] > MAX_BET_SIZE
-        ) revert BetValueOutOfBounds();
+        // MIN_BET_SIZE and MAX_BET_SIZE checks are removed as they are ETH-based and
+        // costABC validation is handled by VotingV2.
 
-        // Calculate shares for each bucket
+        // Calculate the cost difference for the trade.
         (int256 costDiff, int256 newTotalQSquared) = calculateCostOfTrade(
             bucketIds,
             shares
         );
 
         /**
-         * If the voter has not sent the exact amount to cover the cost of the bet, revert.
-         * costDiff may be negative, but we know the votingPower[msg.sender] is positive and that casting a negative number to
-         * uint256 would result in a number larger than they would ever need to send, so the casting is safe for this
-         * check
+         * Sanity check: VotingV2 should have already verified that costABC matches costDiff.
+         * This is a defense-in-depth check within the DPM.
+         * costDiff can be negative for sells, but costABC (representing payment/receipt) should be positive.
+         * For buys, costDiff is positive. For sells, costDiff is negative (representing payout).
+         * The `costABC` parameter from VotingV2 should always be the absolute value of the economic impact.
          */
-        if (votingPower[msg.sender] != uint256(costDiff))
-            revert IncorrectBetValue(costDiff, votingPower[msg.sender]);
+        if (costABC != uint256(costDiff)) {
+            revert IncorrectBetValue(costDiff, costABC); // Error indicates DPM calculated cost vs. provided costABC
+        }
 
         // Track the latest totalQSquared so we don't need to recalculate it
         totalQSquared = newTotalQSquared;
         // Update the markets outcome token holdings
-        _updateHoldings(msg.sender, bucketIds, shares);
+        _updateHoldings(actualUser, bucketIds, shares); // Use actualUser
 
-        // Update the voters total stake
-        tradersStake[msg.sender].totalStake += votingPower[msg.sender];
+        // Update the actualUser's total virtual stake in this market
+        // If costDiff is positive (buy), stake increases. If negative (sell), stake decreases.
+        // This assumes costABC is always positive and represents the magnitude of the change.
+        tradersStake[actualUser].totalStake += costABC;
 
-        emit BoughtShares(msg.sender, costDiff, newTotalQSquared);
+        emit BoughtShares(actualUser, costDiff, newTotalQSquared);
     }
 
     function collectPayout(address trader) external onlyVotingContract {
