@@ -27,12 +27,12 @@ contract OnitInfiniteOutcomeDPM is
 
     /// Configuration Errors
     error AlreadyInitialized();
-    error BettingCutoffOutOfBounds();
+    error SubmissionCutoffOutOfBounds();
     error MarketCreatorCommissionBpOutOfBounds();
     /// Trading Errors
-    error BettingCutoffPassedOrMarketNotOpen();
-    error BetValueOutOfBounds();
-    error IncorrectBetValue(int256 expected, uint256 actual);
+    error SubmissionPeriodClosedOrMarketNotOpen(); // Renamed
+    error SubmissionWeightOutOfBounds(); // Renamed
+    error IncorrectSubmissionWeight(int256 expected, uint256 actual); // Renamed
     error InvalidSharesValue();
     /// Payment/Withdrawal Errors
     error NothingToPay();
@@ -46,7 +46,7 @@ contract OnitInfiniteOutcomeDPM is
 
     /// Market Lifecycle Events
     event MarketInitialized(address indexed initiator, uint256 initialBacking);
-    event BettingCutoffUpdated(uint256 bettingCutoff);
+    event SubmissionCutoffUpdated(uint256 submissionCutoff);
     /// Admin Events
     event CollectedProtocolFee(address indexed receiver, uint256 protocolFee);
     event CollectedMarketCreatorFee(
@@ -55,17 +55,18 @@ contract OnitInfiniteOutcomeDPM is
     );
     /// Trading Events
     event BoughtShares(
-        address indexed trader, // Changed from predictor to trader for clarity with actualUser
-        int256 costDiff,
+        address indexed participant, // Renamed from trader
+        int256 mechanismEffect, // Renamed from costDiff
         int256 newTotalQSquared
     );
     event SoldShares(
-        address indexed trader, // Changed from predictor to trader
-        int256 costDiff,
+        address indexed participant, // Renamed from trader
+        int256 mechanismEffect, // Renamed from costDiff
         int256 newTotalQSquared
     );
     event CollectedPayout(address indexed predictor, uint256 payout);
-    event CollectedVoidedFunds(
+    event VoidedParticipationFundsNoted(
+        // Renamed, as DPM doesn't send funds
         address indexed predictor,
         uint256 totalRepayment
     );
@@ -75,23 +76,19 @@ contract OnitInfiniteOutcomeDPM is
     // ----------------------------------------------------------------
 
     /**
-     * TraderStake is the amount they have put into the market
-     * Traders can:
-     * - Sell their position and leave the market (which makes sense if the traders position is worth more than their
-     * stake)
-     * - Redeem their position when the market closes
-     * - Reclaim their stake if the market is void
-     * - Lose their stake if their prediction generates no return
+     * ParticipantRecord stores the total virtual weight associated with a participant's submissions.
      */
-    struct TraderStake {
-        uint256 totalStake;
+    struct ParticipantRecord {
+        // Renamed from TraderStake
+        uint256 totalSubmissionWeight; // Renamed from totalStake
     }
 
-    // Total amount the trader has bet across all predictions
-    mapping(address trader => TraderStake stake) public tradersStake;
+    // Stores the record for each participant.
+    mapping(address participant => ParticipantRecord record)
+        public participantRecords; // Renamed from tradersStake
 
-    /// Timestamp after which no more bets can be placed (0 = no cutoff)
-    uint256 public bettingCutoff;
+    /// Timestamp after which no more submissions can be made (0 = no cutoff)
+    uint256 public submissionCutoff; // Renamed from bettingCutoff
     /// Total payout pool when the market is resolved
     uint256 public totalPayout;
     /// Number of shares at the resolved outcome
@@ -112,11 +109,11 @@ contract OnitInfiniteOutcomeDPM is
     /// Protocol commission rate in basis points of 10000 (400 = 4%) - Will be re-evaluated if DPM holds no tokens
     uint256 public constant PROTOCOL_COMMISSION_BP = 400;
     /// Maximum market creator commission rate (4%) - Note: docs.txt says no market creator fee
-    uint256 public constant MAX_MARKET_CREATOR_COMMISSION_BP = 400;
-    /// The minimum bet size in ABC token units (e.g., 1 * 10**18 for 1 ABC token if ABC has 18 decimals).
-    uint256 public constant MIN_BET_SIZE = 1 * 10**18; // Assuming 1 ABC token (18 decimals)
-    /// The maximum bet size in ABC token units (e.g., 1,000,000 * 10**18 for 1,000,000 ABC tokens if ABC has 18 decimals).
-    uint256 public constant MAX_BET_SIZE = 1_000_000 * 10**18; // Assuming 1,000,000 ABC tokens (18 decimals)
+    uint256 public constant MAX_MARKET_CREATOR_COMMISSION_BP = 400; // To be removed if no market creator fee
+    /// The minimum submission weight in ABC token units.
+    uint256 public constant MIN_SUBMISSION_WEIGHT = 1 * 10 ** 18; // Renamed from MIN_BET_SIZE
+    /// The maximum submission weight in ABC token units.
+    uint256 public constant MAX_SUBMISSION_WEIGHT = 1_000_000 * 10 ** 18; // Renamed from MAX_BET_SIZE
     /// The version of the market
     string public constant VERSION = "0.0.2";
 
@@ -126,7 +123,7 @@ contract OnitInfiniteOutcomeDPM is
     struct MarketConfig {
         address marketCreatorFeeReceiver;
         uint256 marketCreatorCommissionBp;
-        uint256 bettingCutoff;
+        uint256 submissionCutoff; // Renamed
         uint256 withdrawlDelayPeriod;
         int256 outcomeUnit;
         string marketQuestion;
@@ -139,9 +136,9 @@ contract OnitInfiniteOutcomeDPM is
         /// Onit factory contract with the Onit admin address
         address onitFactory;
         /// Address that gets the initial prediction
-        address initiator;
-        /// Seeded funds to initialize the market pot (repurposed for initialLiquidityABC)
-        uint256 seededFunds;
+        address initiator; // This is the first participant
+        /// Initial virtual weight for the market (from VotingV2's initialLiquidityABC)
+        uint256 initialVirtualWeight; // Renamed from seededFunds
         /// Market configuration
         MarketConfig config;
         /// Bucket ids for the initial prediction
@@ -174,23 +171,25 @@ contract OnitInfiniteOutcomeDPM is
     function initialize(MarketInitData memory initData) external payable {
         // For the virtual ABC model:
         // - msg.value will be 0 (as called by VotingV2).
-        // - initData.seededFunds will be populated by VotingV2 with initialLiquidityABC.
-        // This initialLiquidityABC is the "initial bet value" in virtual ABC terms.
-        uint256 initialBetValueABC = initData.seededFunds; // Repurposing seededFunds to carry initialLiquidityABC
+        // - initData.initialVirtualWeight will be populated by VotingV2 with initialLiquidityABC.
+        // This is the "initial submission weight" in virtual ABC terms.
+        uint256 initialSubmissionWeightABC = initData.initialVirtualWeight; // Using renamed field
 
         // Prevents the implementation from being initialized
         if (marketVoided) revert AlreadyInitialized();
 
-        // Apply MIN_BET_SIZE and MAX_BET_SIZE checks to the virtual initialBetValueABC.
+        // Apply MIN_SUBMISSION_WEIGHT and MAX_SUBMISSION_WEIGHT checks to the virtual initialSubmissionWeightABC.
         // These constants MUST be defined in ABC token units (e.g., considering ABC's decimals).
-        if (initialBetValueABC < MIN_BET_SIZE || initialBetValueABC > MAX_BET_SIZE)
-            revert BetValueOutOfBounds();
+        if (
+            initialSubmissionWeightABC < MIN_SUBMISSION_WEIGHT ||
+            initialSubmissionWeightABC > MAX_SUBMISSION_WEIGHT
+        ) revert SubmissionWeightOutOfBounds(); // Renamed error
 
         if (
-            initData.config.bettingCutoff != 0 &&
-            initData.config.bettingCutoff <= block.timestamp
+            initData.config.submissionCutoff != 0 && // Using renamed field
+            initData.config.submissionCutoff <= block.timestamp // Using renamed field
         ) {
-            revert BettingCutoffOutOfBounds();
+            revert SubmissionCutoffOutOfBounds();
         }
         if (
             initData.config.marketCreatorCommissionBp >
@@ -207,30 +206,30 @@ contract OnitInfiniteOutcomeDPM is
         );
 
         // VotingV2 ensures that if initialBucketIds/initialShares are provided,
-        // initialBetValueABC (i.e., initialLiquidityABC) correctly matches their calculated cost.
+        // initialSubmissionWeightABC (i.e., initialLiquidityABC) correctly matches their calculated cost.
         // The DPM trusts this pre-validation by VotingV2.
 
         // Initialize Infinite Outcome DPM
         _initializeInfiniteOutcomeDPM(
             initData.initiator,
             initData.config.outcomeUnit,
-            int256(initialBetValueABC), // Pass the virtual initialBetValueABC
+            int256(initialSubmissionWeightABC), // Pass the virtual weight
             initData.initialShares,
             initData.initialBucketIds
         );
 
         // Set market description
         marketQuestion = initData.config.marketQuestion;
-        // Set time limit for betting
-        bettingCutoff = initData.config.bettingCutoff;
+        // Set time limit for submissions
+        submissionCutoff = initData.config.submissionCutoff; // Using renamed field
         // Set market creator
         marketCreatorFeeReceiver = initData.config.marketCreatorFeeReceiver;
         // Set market creator commission rate
         marketCreatorCommissionBp = initData.config.marketCreatorCommissionBp;
 
-        // Update the traders stake with the virtual ABC amount
-        tradersStake[initData.initiator] = TraderStake({
-            totalStake: initialBetValueABC // This is in virtual ABC units
+        // Update the participant's record with the virtual ABC amount
+        participantRecords[initData.initiator] = ParticipantRecord({ // Using renamed mapping and struct
+            totalSubmissionWeight: initialSubmissionWeightABC // Using renamed field
         });
 
         emit MarketInitialized(initData.initiator, msg.value); // msg.value will be 0
@@ -304,21 +303,22 @@ contract OnitInfiniteOutcomeDPM is
     }
 
     /**
-     * @notice Update the betting cutoff
+     * @notice Update the submission cutoff
      *
-     * @param _bettingCutoff The new betting cutoff
+     * @param _submissionCutoff The new submission cutoff
      *
      * @dev Can only be called by the Onit factory owner
-     * @dev This enables the owner to extend the betting period, or close betting early without resolving the market
+     * @dev This enables the owner to extend the submission period, or close submissions early without resolving the market
      * - It allows for handling unexpected events that delay the market resolution criteria being confirmed
      * - This function should be made more robust in future versions
      */
-    function updateBettingCutoff(
-        uint256 _bettingCutoff
+    function updateSubmissionCutoff(
+        // Renamed
+        uint256 _submissionCutoff // Renamed parameter
     ) external onlyOnitFactoryOwner {
-        bettingCutoff = _bettingCutoff;
+        submissionCutoff = _submissionCutoff; // Corrected assignment
 
-        emit BettingCutoffUpdated(_bettingCutoff);
+        emit SubmissionCutoffUpdated(_submissionCutoff); // Event name not changed in diff
     }
 
     /**
@@ -391,57 +391,67 @@ contract OnitInfiniteOutcomeDPM is
     // ----------------------------------------------------------------
 
     /**
-     * @notice Executes a trade (buy/sell shares) for a user, funded by virtual ABC tokens.
+     * @notice Records a user's confidence submission (shares distribution) backed by virtual ABC weight.
      * @dev Called by `VotingV2` (the `votinContractAddress`). `VotingV2` is responsible for
-     *      validating that `costABC` matches the DPM's calculated cost for the trade and
-     *      that the `actualUser` has sufficient backing stake in `VotingV2`.
-     * @param actualUser The end-user performing the trade.
-     * @param costABC The amount of virtual ABC tokens representing the cost of this trade.
-     * @param bucketIds The bucket IDs for the trade.
-     * @param shares The shares for the trade (positive for buy, negative for sell).
+     *      validating that `submissionWeightABC` matches the DPM's calculated mechanism effect for the submission and
+     *      that the `participant` has sufficient backing stake in `VotingV2`.
+     * @param participant The end-user making the submission.
+     * @param submissionWeightABC The amount of virtual ABC tokens representing the weight of this submission.
+     * @param bucketIds The bucket IDs for the submission.
+     * @param shares The shares for the submission (positive for acquiring, negative for relinquishing).
      */
-    function executeTradeForUser(
-        // Renamed from vote
-        address actualUser,
-        uint256 costABC,
+    function recordSubmission(
+        // Renamed from executeTradeForUser
+        address participant, // Renamed from actualUser
+        uint256 submissionWeightABC, // Renamed from costABC
         int256[] memory bucketIds,
         int256[] memory shares
     ) external onlyVotingContract {
-        if (bettingCutoff != 0 && block.timestamp > bettingCutoff)
-            revert BettingCutoffPassedOrMarketNotOpen(); // Adjusted error name
+        if (submissionCutoff != 0 && block.timestamp > submissionCutoff)
+            // Using renamed state var
+            revert SubmissionPeriodClosedOrMarketNotOpen(); // Using renamed error
         if (resolvedAtTimestamp != 0) revert MarketIsResolved();
         if (marketVoided) revert MarketIsVoided();
-        // MIN_BET_SIZE and MAX_BET_SIZE checks are removed as they are ETH-based and
-        // costABC validation is handled by VotingV2.
+        // MIN_SUBMISSION_WEIGHT and MAX_SUBMISSION_WEIGHT checks are implicitly handled by VotingV2
+        // ensuring submissionWeightABC is valid against the DPM's calculated mechanismEffect.
 
-        // Calculate the cost difference for the trade.
-        (int256 costDiff, int256 newTotalQSquared) = calculateCostOfTrade(
-            bucketIds,
-            shares
-        );
+        // Calculate the mechanism's effect (e.g., cost to acquire/value from relinquishing shares).
+        (
+            int256 mechanismEffect,
+            int256 newTotalQSquared
+        ) = calculateCostOfTrade(bucketIds, shares); // Renamed internal var
 
         /**
-         * Sanity check: VotingV2 should have already verified that costABC matches costDiff.
+         * Sanity check: VotingV2 should have already verified that submissionWeightABC matches mechanismEffect.
          * This is a defense-in-depth check within the DPM.
-         * costDiff can be negative for sells, but costABC (representing payment/receipt) should be positive.
-         * For buys, costDiff is positive. For sells, costDiff is negative (representing payout).
-         * The `costABC` parameter from VotingV2 should always be the absolute value of the economic impact.
+         * mechanismEffect can be negative for relinquishing shares, but submissionWeightABC should be positive.
+         * For acquiring, mechanismEffect is positive. For relinquishing, mechanismEffect is negative.
+         * The `submissionWeightABC` from VotingV2 should always be the absolute value of the economic impact.
          */
-        if (costABC != uint256(costDiff)) {
-            revert IncorrectBetValue(costDiff, costABC); // Error indicates DPM calculated cost vs. provided costABC
+        if (
+            submissionWeightABC !=
+            (
+                mechanismEffect > 0
+                    ? uint256(mechanismEffect)
+                    : uint256(-mechanismEffect)
+            )
+        ) {
+            revert IncorrectSubmissionWeight(
+                mechanismEffect,
+                submissionWeightABC
+            ); // Using renamed error
         }
 
         // Track the latest totalQSquared so we don't need to recalculate it
         totalQSquared = newTotalQSquared;
         // Update the markets outcome token holdings
-        _updateHoldings(actualUser, bucketIds, shares); // Use actualUser
+        _updateHoldings(participant, bucketIds, shares); // Use renamed parameter
 
-        // Update the actualUser's total virtual stake in this market
-        // If costDiff is positive (buy), stake increases. If negative (sell), stake decreases.
-        // This assumes costABC is always positive and represents the magnitude of the change.
-        tradersStake[actualUser].totalStake += costABC;
+        // Update the participant's total virtual submission weight in this market
+        participantRecords[participant]
+            .totalSubmissionWeight += submissionWeightABC; // Using renamed mapping and field
 
-        emit BoughtShares(actualUser, costDiff, newTotalQSquared);
+        emit BoughtShares(participant, mechanismEffect, newTotalQSquared); // Using renamed event params
     }
 
     function collectPayout(address trader) external onlyVotingContract {
@@ -453,11 +463,12 @@ contract OnitInfiniteOutcomeDPM is
         // Calculate payout (TODO: change implementation later)
         uint256 payout = _calculatePayout(trader);
 
-        // If caller has no stake, has already claimed, revert
-        if (tradersStake[trader].totalStake == 0) revert NothingToPay();
+        // If participant has no virtual weight, or has already claimed, revert
+        if (participantRecords[trader].totalSubmissionWeight == 0)
+            revert NothingToPay(); // Using renamed mapping/field
 
-        // Set stake to 0, preventing multiple payouts
-        tradersStake[trader].totalStake = 0;
+        // Set virtual weight to 0, preventing multiple payouts (if DPM handles payout state)
+        participantRecords[trader].totalSubmissionWeight = 0; // Using renamed mapping/field
 
         // Send payout to prediction owner
         (bool success, ) = trader.call{value: payout}("");
@@ -469,16 +480,17 @@ contract OnitInfiniteOutcomeDPM is
     function collectVoidedFunds(address trader) external {
         if (!marketVoided) revert MarketIsOpen();
 
-        // Get the total repayment, then set totalStake storage to 0 to prevent multiple payouts
-        uint256 totalRepayment = tradersStake[trader].totalStake;
-        tradersStake[trader].totalStake = 0;
+        // Get the total repayment, then set totalSubmissionWeight storage to 0 to prevent multiple payouts
+        uint256 totalRepayment = participantRecords[trader]
+            .totalSubmissionWeight; // Using renamed mapping/field
+        participantRecords[trader].totalSubmissionWeight = 0; // Using renamed mapping/field
 
         if (totalRepayment == 0) revert NothingToPay();
 
         (bool success, ) = trader.call{value: totalRepayment}("");
         if (!success) revert TransferFailed();
 
-        emit CollectedVoidedFunds(trader, totalRepayment);
+        emit VoidedParticipationFundsNoted(trader, totalRepayment); // Using renamed event
     }
 
     /**
