@@ -229,16 +229,14 @@ contract VotingV2 is Staker {
 
         // CRITICAL DPM ADAPTATION REQUIRED:
         // The DPM's initialize function calculates: `initialBetValue = msg.value - initData.seededFunds;`
-        // We are calling with `msg.value = 0`. `initData.seededFunds` is also 0.
+        // We are calling with `msg.value = 0`.
         // The `initialLiquidityABC` should be used by the DPM to set its initial state.
-        // This requires OnitInfiniteOutcomeDPM.initialize to be adapted to accept an ABC value,
-        // or for VotingV2 to transfer ABC to the DPM if the DPM is modified to hold ABC.
+        // This requires OnitInfiniteOutcomeDPM.initialize to be adapted to accept an ABC value.
+        // We will pass initialLiquidityABC via initData.seededFunds.
         MarketInitData memory marketInitData = MarketInitData({
             onitFactory: address(this), // VotingV2 acts as the factory/admin for the DPM
             initiator: initiator,
-            seededFunds: 0, // ETH-based seededFunds, not used for ABC liquidity.
-            // A new field like `initialLiquidityValueABC: initialLiquidityABC` might be needed in MarketInitData
-            // for the DPM to consume `initialLiquidityABC`.
+            seededFunds: initialLiquidityABC, // Pass initialLiquidityABC as seededFunds for DPM
             config: marketConfig,
             initialBucketIds: initialBucketIds,
             initialShares: initialShares

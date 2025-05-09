@@ -114,9 +114,11 @@ contract OnitInfiniteOutcomeDPM is
     /// Maximum market creator commission rate (4%) - Note: docs.txt says no market creator fee
     uint256 public constant MAX_MARKET_CREATOR_COMMISSION_BP = 400;
     /// The minimum bet size (ETH denominated, will be removed/ignored for virtual ABC)
-    uint256 public constant MIN_BET_SIZE = 1 ether; // To be removed or adapted
+    /// For virtual ABC, this should be in ABC units (e.g., 1 * 10**18 for 1 ABC token if 18 decimals)
+    uint256 public constant MIN_BET_SIZE = 1 ether; // To be removed or adapted for ABC units
     /// The maximum bet size (ETH denominated, will be removed/ignored for virtual ABC)
-    uint256 public constant MAX_BET_SIZE = 1_000_000 ether; // To be removed or adapted
+    /// For virtual ABC, this should be in ABC units
+    uint256 public constant MAX_BET_SIZE = 1_000_000 ether; // To be removed or adapted for ABC units
     /// The version of the market
     string public constant VERSION = "0.0.2";
 
@@ -140,7 +142,7 @@ contract OnitInfiniteOutcomeDPM is
         address onitFactory;
         /// Address that gets the initial prediction
         address initiator;
-        /// Seeded funds to initialize the market pot
+        /// Seeded funds to initialize the market pot (repurposed for initialLiquidityABC)
         uint256 seededFunds;
         /// Market configuration
         MarketConfig config;
@@ -172,13 +174,15 @@ contract OnitInfiniteOutcomeDPM is
      * @param initData The market initialization data
      */
     function initialize(MarketInitData memory initData) external payable {
-        // For virtual ABC model, msg.value will be 0. initData.seededFunds is also 0 from VotingV2.
-        // The true "initial value" comes from initialLiquidityABC managed by VotingV2.
-        // uint256 initialBetValue = msg.value - initData.seededFunds; // This becomes 0
+        // For the virtual ABC model:
+        // - msg.value will be 0 (as called by VotingV2).
+        // - initData.seededFunds will be populated by VotingV2 with initialLiquidityABC.
+        // This initialLiquidityABC is the "initial bet value" in virtual ABC terms.
+        uint256 initialBetValueABC = initData.seededFunds; // Repurposing seededFunds to carry initialLiquidityABC
 
         // Prevents the implementation from being initialized
         if (marketVoided) revert AlreadyInitialized();
-        // If cutoff is set, it must be greater than now
+
         if (
             initData.config.bettingCutoff != 0 &&
             initData.config.bettingCutoff <= block.timestamp
@@ -199,25 +203,15 @@ contract OnitInfiniteOutcomeDPM is
             initData.config.resolvers
         );
 
-        // Calculate the cost of initial shares, if any. This cost is what VotingV2's initialLiquidityABC covers.
-        int256 costOfInitialShares = 0;
-        if (initData.initialBucketIds.length > 0) {
-            // This calculation should ideally use the DPM's own mechanism state (kappa)
-            // For now, assuming calculateCostOfTrade can be called statically or on an uninitialized state
-            // if it only depends on kappa (which is constant in OnitInfiniteOutcomeDPMMechanism)
-            // and the provided shares/buckets.
-            (costOfInitialShares, ) = calculateCostOfTrade(
-                initData.initialBucketIds,
-                initData.initialShares
-            );
-            // VotingV2 already validates that initialLiquidityABC == uint256(costOfInitialShares)
-        }
+        // VotingV2 ensures that if initialBucketIds/initialShares are provided,
+        // initialBetValueABC (i.e., initialLiquidityABC) correctly matches their calculated cost.
+        // The DPM trusts this pre-validation by VotingV2.
 
         // Initialize Infinite Outcome DPM
         _initializeInfiniteOutcomeDPM(
             initData.initiator,
             initData.config.outcomeUnit,
-            costOfInitialShares, // The "initial bet value" is the cost of the initial shares for the mechanism.
+            int256(initialBetValueABC), // Pass the virtual initialBetValueABC
             initData.initialShares,
             initData.initialBucketIds
         );
@@ -231,12 +225,12 @@ contract OnitInfiniteOutcomeDPM is
         // Set market creator commission rate
         marketCreatorCommissionBp = initData.config.marketCreatorCommissionBp;
 
-        // Update the traders stake with the virtual ABC amount (cost of initial shares)
+        // Update the traders stake with the virtual ABC amount
         tradersStake[initData.initiator] = TraderStake({
-            totalStake: uint256(costOfInitialShares) // This is in virtual ABC units
+            totalStake: initialBetValueABC // This is in virtual ABC units
         });
 
-        emit MarketInitialized(initData.initiator, msg.value);
+        emit MarketInitialized(initData.initiator, msg.value); // msg.value will be 0
     }
 
     // ----------------------------------------------------------------
