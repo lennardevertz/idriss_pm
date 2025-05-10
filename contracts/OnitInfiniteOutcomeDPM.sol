@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {convert, convert, div, mul} from "@prb/math/src/SD59x18.sol";
+import {convert, div, mul} from "@prb/math/src/SD59x18.sol";
 
 import {OnitInfiniteOutcomeDPMMechanism} from "./mechanisms/infinite-outcome-DPM/OnitInfiniteOutcomeDPMMechanism.sol";
 import {OnitMarketResolver} from "./resolvers/OnitMarketResolver.sol";
@@ -64,7 +64,7 @@ contract OnitInfiniteOutcomeDPM is
         int256 mechanismEffect, // Renamed from costDiff
         int256 newTotalQSquared
     );
-    event CollectedPayout(address indexed predictor, uint256 payout);
+    // event CollectedPayout(address indexed predictor, uint256 payout); // Removed
     event VoidedParticipationFundsNoted(
         // Renamed, as DPM doesn't send funds
         address indexed predictor,
@@ -89,10 +89,13 @@ contract OnitInfiniteOutcomeDPM is
 
     /// Timestamp after which no more submissions can be made (0 = no cutoff)
     uint256 public submissionCutoff; // Renamed from bettingCutoff
-    /// Total payout pool when the market is resolved
-    uint256 public totalPayout;
-    /// Number of shares at the resolved outcome
-    int256 public winningBucketSharesAtClose;
+    
+    // --- Confidence Aggregation State ---
+    int256 public aggregatedMeanSd59x18;
+    int256 public aggregatedStdDevSd59x18;
+    bool public confidenceAggregationComplete;
+    uint256 public aggregationFinalizedTimestamp;
+    // --- End Confidence Aggregation State ---
 
     /// Protocol fee collected, set at market close
     uint256 public protocolFee;
@@ -249,39 +252,42 @@ contract OnitInfiniteOutcomeDPM is
     }
 
     /**
-     * @notice Set the resolved outcome, closing the market
-     *
-     * @param _resolvedOutcome The resolved value of the market
+     * @notice Finalizes the confidence market by calculating aggregated metrics.
+     * @dev Called by a resolver (e.g., VotingV2) after the submissionCutoff has passed.
      */
-    function resolveMarket(int256 _resolvedOutcome) external onlyResolver {
-        _setResolvedOutcome(_resolvedOutcome, getBucketId(_resolvedOutcome));
+    function finalizeConfidenceMarket() external onlyResolver {
+        if (submissionCutoff == 0 || block.timestamp < submissionCutoff) {
+            revert SubmissionPeriodClosedOrMarketNotOpen();
+        }
+        if (confidenceAggregationComplete) {
+            revert AlreadyInitialized(); // Or "AggregationAlreadyComplete"
+        }
+        if (marketVoided) {
+            revert MarketIsVoided();
+        }
 
-        uint256 finalBalance = address(this).balance;
+        // --- Placeholder for Mean and Standard Deviation Calculation ---
+        // This section will need to be replaced with actual logic to iterate
+        // through participant submissions (their share distributions in _holdings)
+        // and calculate the aggregated mean and standard deviation.
+        // This is a complex and potentially gas-intensive operation.
+        int256 placeholderMean = convert(100); 
+        int256 placeholderStdDev = convert(10);
+        aggregatedMeanSd59x18 = placeholderMean;
+        aggregatedStdDevSd59x18 = placeholderStdDev;
+        // --- End Placeholder ---
 
-        // Calculate market maker fee
-        uint256 _protocolFee = (finalBalance * PROTOCOL_COMMISSION_BP) / 10_000;
-        protocolFee = _protocolFee;
+        confidenceAggregationComplete = true;
+        aggregationFinalizedTimestamp = block.timestamp;
 
-        uint256 _marketCreatorFee = (finalBalance * marketCreatorCommissionBp) /
-            10_000;
-        marketCreatorFee = _marketCreatorFee;
+        // Use _setResolvedOutcome to set the resolvedAtTimestamp, which signals finalization.
+        // Pass the mean as the "resolvedOutcome" for compatibility/information.
+        // The bucketId is set to 0 as it's not a single winning bucket in this model.
+        _setResolvedOutcome(aggregatedMeanSd59x18, 0); 
 
-        // Calculate total payout pool
-        totalPayout = finalBalance - protocolFee - marketCreatorFee;
-
-        /**
-         * Set the total shares at the resolved outcome, traders payouts are:
-         * totalPayout * tradersSharesAtOutcome/totalSharesAtOutcome
-         */
-        winningBucketSharesAtClose = getBucketOutstandingShares(
-            resolvedBucketId
-        );
-
-        emit MarketResolved(
-            _resolvedOutcome,
-            winningBucketSharesAtClose,
-            totalPayout
-        );
+        // Emit an event indicating confidence market finalization
+        // winningBucketSharesAtClose and totalPayout are 0 as they are not used in this model.
+        emit MarketResolved(aggregatedMeanSd59x18, 0, 0); 
     }
 
     /**
@@ -299,7 +305,11 @@ contract OnitInfiniteOutcomeDPM is
     function updateResolution(
         int256 _resolvedOutcome
     ) external onlyOnitFactoryOwner {
+        // If this function is still needed, its interaction with confidenceAggregationComplete
+        // and the aggregated metrics needs to be considered.
+        // For now, it updates the base resolvedOutcome.
         _updateResolvedOutcome(_resolvedOutcome, getBucketId(_resolvedOutcome));
+        // Potentially re-calculate or flag aggregated metrics for review if _resolvedOutcome changes.
     }
 
     /**
@@ -328,15 +338,20 @@ contract OnitInfiniteOutcomeDPM is
      */
     function withdrawFees(address receiver) external onlyOnitFactoryOwner {
         if (marketVoided) revert MarketIsVoided();
-        if (resolvedAtTimestamp == 0) revert MarketIsOpen();
+        if (resolvedAtTimestamp == 0) revert MarketIsOpen(); // Checks if _setResolvedOutcome was called
         if (block.timestamp < resolvedAtTimestamp + withdrawlDelayPeriod)
             revert WithdrawalDelayPeriodNotPassed();
 
-        uint256 _protocolFee = protocolFee;
+        // Note: Protocol fee calculation might need adjustment if it's not based on ETH balance.
+        // For a virtual ABC system, the DPM might not hold actual funds for fees.
+        // This logic is retained from the original contract but might be deprecated or changed.
+        uint256 _protocolFee = protocolFee; // protocolFee would need to be set by finalizeConfidenceMarket if applicable
         protocolFee = 0;
 
-        (bool success, ) = receiver.call{value: _protocolFee}("");
-        if (!success) revert TransferFailed();
+        if (_protocolFee > 0) { // Only attempt transfer if there's a fee
+            (bool success, ) = receiver.call{value: _protocolFee}("");
+            if (!success) revert TransferFailed();
+        }
 
         emit CollectedProtocolFee(receiver, _protocolFee);
     }
@@ -349,18 +364,21 @@ contract OnitInfiniteOutcomeDPM is
      */
     function withdrawMarketCreatorFees() external {
         if (marketVoided) revert MarketIsVoided();
-        if (resolvedAtTimestamp == 0) revert MarketIsOpen();
+        if (resolvedAtTimestamp == 0) revert MarketIsOpen(); // Checks if _setResolvedOutcome was called
         if (block.timestamp < resolvedAtTimestamp + withdrawlDelayPeriod)
             revert WithdrawalDelayPeriodNotPassed();
 
-        uint256 _marketCreatorFee = marketCreatorFee;
+        // Similar to protocol fees, marketCreatorFee calculation and source might change.
+        uint256 _marketCreatorFee = marketCreatorFee; // marketCreatorFee would need to be set by finalizeConfidenceMarket
         marketCreatorFee = 0;
 
-        (bool success, ) = marketCreatorFeeReceiver.call{
-            value: _marketCreatorFee
-        }("");
-        if (!success) revert TransferFailed();
-
+        if (_marketCreatorFee > 0) { // Only attempt transfer if there's a fee
+            (bool success, ) = marketCreatorFeeReceiver.call{
+                value: _marketCreatorFee
+            }("");
+            if (!success) revert TransferFailed();
+        }
+        
         emit CollectedMarketCreatorFee(
             marketCreatorFeeReceiver,
             _marketCreatorFee
@@ -380,6 +398,7 @@ contract OnitInfiniteOutcomeDPM is
             revert WithdrawalDelayPeriodNotPassed();
         }
         if (marketVoided) revert MarketIsVoided();
+        // This function implies the contract holds ETH. In a virtual ABC system, this might not be the case.
         (bool success, ) = onitFactoryOwner().call{
             value: address(this).balance
         }("");
@@ -410,7 +429,7 @@ contract OnitInfiniteOutcomeDPM is
         if (submissionCutoff != 0 && block.timestamp > submissionCutoff)
             // Using renamed state var
             revert SubmissionPeriodClosedOrMarketNotOpen(); // Using renamed error
-        if (resolvedAtTimestamp != 0) revert MarketIsResolved();
+        if (resolvedAtTimestamp != 0) revert MarketIsResolved(); // Check against general resolution timestamp
         if (marketVoided) revert MarketIsVoided();
         // MIN_SUBMISSION_WEIGHT and MAX_SUBMISSION_WEIGHT checks are implicitly handled by VotingV2
         // ensuring submissionWeightABC is valid against the DPM's calculated mechanismEffect.
@@ -454,29 +473,6 @@ contract OnitInfiniteOutcomeDPM is
         emit BoughtShares(participant, mechanismEffect, newTotalQSquared); // Using renamed event params
     }
 
-    function collectPayout(address trader) external onlyVotingContract {
-        if (resolvedAtTimestamp == 0) revert MarketIsOpen();
-        if (block.timestamp < resolvedAtTimestamp + withdrawlDelayPeriod)
-            revert WithdrawalDelayPeriodNotPassed();
-        if (marketVoided) revert MarketIsVoided();
-
-        // Calculate payout (TODO: change implementation later)
-        uint256 payout = _calculatePayout(trader);
-
-        // If participant has no virtual weight, or has already claimed, revert
-        if (participantRecords[trader].totalSubmissionWeight == 0)
-            revert NothingToPay(); // Using renamed mapping/field
-
-        // Set virtual weight to 0, preventing multiple payouts (if DPM handles payout state)
-        participantRecords[trader].totalSubmissionWeight = 0; // Using renamed mapping/field
-
-        // Send payout to prediction owner
-        (bool success, ) = trader.call{value: payout}("");
-        if (!success) revert TransferFailed();
-
-        emit CollectedPayout(trader, payout);
-    }
-
     function collectVoidedFunds(address trader) external {
         if (!marketVoided) revert MarketIsOpen();
 
@@ -487,52 +483,118 @@ contract OnitInfiniteOutcomeDPM is
 
         if (totalRepayment == 0) revert NothingToPay();
 
-        (bool success, ) = trader.call{value: totalRepayment}("");
-        if (!success) revert TransferFailed();
+        // In a virtual ABC system, the DPM doesn't hold funds to send back.
+        // This function's purpose needs re-evaluation. VotingV2 would manage the "voided" stake.
+        // For now, emitting an event might be sufficient for VotingV2 to react.
+        // (bool success, ) = trader.call{value: totalRepayment}(""); // This line would fail if DPM holds no ETH
+        // if (!success) revert TransferFailed();
 
         emit VoidedParticipationFundsNoted(trader, totalRepayment); // Using renamed event
     }
 
-    /**
-     * @notice Calculate the payout for a trader
-     *
-     * @param trader The address of the trader
-     *
-     * @return payout The payout amount
-     */
-    function calculatePayout(address trader) external view returns (uint256) {
-        return _calculatePayout(trader);
-    }
-
     // ----------------------------------------------------------------
-    // Internal functions
+    // View functions for VotingV2 / Aggregation
     // ----------------------------------------------------------------
 
     /**
-     * @notice Calculate the payout for a prediction
-     *
-     * @param trader The address of the trader
-     *
-     * @return payout The payout amount, TODO: adjust on new system
+     * @notice Returns the aggregated confidence metrics for the market.
+     * @return mean The aggregated mean (SD59x18).
+     * @return stdDev The aggregated standard deviation (SD59x18).
+     * @return isComplete True if aggregation is complete, false otherwise.
+     * @return finalizedTimestamp Timestamp of finalization.
      */
-    function _calculatePayout(address trader) internal view returns (uint256) {
-        // Get total shares in winning bucket
-        int256 totalBucketShares = getBucketOutstandingShares(resolvedBucketId);
-        if (totalBucketShares == 0) return 0;
-
-        // Get traders balance of the winning bucket
-        uint256 traderShares = getBalanceOfShares(trader, resolvedBucketId);
-
-        // Calculate payout based on share of winning bucket
-        return
-            uint256(
-                convert(
-                    convert(int256(traderShares))
-                        .mul(convert(int256(totalPayout)))
-                        .div(convert(totalBucketShares))
-                )
-            );
+    function getAggregatedConfidenceMetrics()
+        external
+        view
+        returns (
+            int256 mean,
+            int256 stdDev,
+            bool isComplete,
+            uint256 finalizedTimestamp
+        )
+    {
+        return (
+            aggregatedMeanSd59x18,
+            aggregatedStdDevSd59x18,
+            confidenceAggregationComplete,
+            aggregationFinalizedTimestamp
+        );
     }
+
+    enum ParticipantPerformanceStatus { NotApplicable, InBand, OutOfBand }
+
+    /**
+     * @notice Determines if a participant's submission is within the confidence band.
+     * @dev This is a placeholder. The actual logic requires deriving an "effective score"
+     *      from the participant's share distribution (_holdings) and comparing it
+     *      against the aggregated mean and standard deviation.
+     * @param participant The address of the participant.
+     * @param mean The aggregated mean of the market (Sd59x18).
+     * @param stdDev The aggregated standard deviation of the market (Sd59x18).
+     * @return status Enum indicating if InBand, OutOfBand, or NotApplicable (e.g., no submission).
+     */
+    function determineParticipantBandStatus(
+        address participant,
+        int256 mean,
+        int256 stdDev
+    ) external view returns (ParticipantPerformanceStatus status) {
+        if (!confidenceAggregationComplete) {
+            return ParticipantPerformanceStatus.NotApplicable; // Or revert: MarketNotYetAggregated
+        }
+        if (participantRecords[participant].totalSubmissionWeight == 0) {
+            return ParticipantPerformanceStatus.NotApplicable; // No submission to evaluate
+        }
+
+        // --- Placeholder for deriving participant's effective score ---
+        // This is the complex part:
+        // 1. Access participant's share distribution from `_holdings` (e.g., using `getBalanceOfSharesInBucketRange`).
+        // 2. Calculate a single "effective score" or "implied mean" from this distribution.
+        //    For example, a weighted average of the centers of the buckets in which they hold shares.
+        //    The weight for each bucket could be the number of shares they hold in that bucket.
+        //
+        // int256 participantEffectiveScore = _calculateParticipantEffectiveScore(participant); // Hypothetical internal function
+        //
+        // For now, as a simple placeholder, let's assume the participant's effective score
+        // is the market mean if they participated. This is NOT realistic.
+        int256 participantEffectiveScore = mean; // Simulate they voted exactly the mean for now
+        // --- End Placeholder ---
+
+        // Determine if in band (e.g., mean +/- 1 standard deviation)
+        // Ensure stdDev is non-negative if it can be. PRBMath SD59x18 can be negative.
+        // For band calculation, absolute stdDev might be intended, or ensure it's positive from aggregation.
+        int256 lowerBound = mean - (stdDev > 0 ? stdDev : -stdDev); // Example: using absolute stdDev
+        int256 upperBound = mean + (stdDev > 0 ? stdDev : -stdDev); // Example: using absolute stdDev
+
+        if (
+            participantEffectiveScore >= lowerBound &&
+            participantEffectiveScore <= upperBound
+        ) {
+            return ParticipantPerformanceStatus.InBand;
+        } else {
+            return ParticipantPerformanceStatus.OutOfBand;
+        }
+    }
+
+    // --- Hypothetical internal function to calculate effective score from shares ---
+    // function _calculateParticipantEffectiveScore(address participant) internal view returns (int256 effectiveScore) {
+    //     // Logic to iterate participant's shares in various buckets from `_holdings`
+    //     // and compute a weighted average or similar metric.
+    //     // This would use `getBalanceOfShares(participant, bucketId)` and `getBucketCenter(bucketId)`.
+    //     // This is computationally intensive if the participant has shares in many buckets.
+    //     // Example sketch:
+    //     // int256 totalWeightedScore = 0;
+    //     // int256 totalSharesConsidered = 0;
+    //     // For each bucketId where participant has shares:
+    //     //   int256 sharesInBucket = getBalanceOfShares(participant, bucketId);
+    //     //   if (sharesInBucket > 0) {
+    //     //     int256 bucketCenter = getBucketCenter(bucketId);
+    //     //     totalWeightedScore = totalWeightedScore.add(bucketCenter.mul(sharesInBucket));
+    //     //     totalSharesConsidered = totalSharesConsidered.add(sharesInBucket);
+    //     //   }
+    //     // if (totalSharesConsidered == 0) return convert(0); // Or handle as error/default
+    //     // effectiveScore = totalWeightedScore.div(totalSharesConsidered);
+    //     return convert(0); // Placeholder
+    // }
 
     // ----------------------------------------------------------------
     // Modifier

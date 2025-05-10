@@ -1,3 +1,36 @@
++ ## System Summary: Decentralized Claim Verification
++
++ **Functionality:**
++ This system enables a community to collectively assess the veracity or characteristics of specific claims or pieces of content. The process involves:
++ 1.  **Claim Submission:** Users can introduce topics for community assessment (e.g., "Is statement X true?", "Is image Y AI-generated?").
++ 2.  **Confidence Staking:** Participants use an ERC20 token to express their confidence level regarding the assessment of the submitted claim. This is done by allocating shares across different potential assessments or confidence buckets within a specialized mechanism.
++ 3.  **Collective Assessment Display:** All individual confidence submissions are aggregated onchain. The system displays a collective viewpoint, typically represented as an average assessed value (mean) and the spread of opinions (standard deviation).
++ 4.  **Consensus Incentivization:** Participants whose expressed confidence aligns with the final aggregated community assessment receive rewards. Submissions that significantly deviate from this consensus result in a reallocation of a portion of the participant's staked tokens.
++
++ **Core Principle:** The system determines the "assessed truth" or "verified characteristic" of a claim based on the aggregated, stake-weighted confidence of its participants. It does not rely on external oracles for this primary assessment.
++ ---
++
++ ## Technical Details and Differentiation
++
++ **Underlying Mechanism:**
++ The system utilizes a Dynamic Parimutuel Market (DPM) mechanism, adapted for confidence aggregation rather than financial betting:
++ *   **Virtual Stake Interaction:** Participants stake an ERC20 token in a central contract (currently called `VotingV2`). When submitting confidence on a claim, no tokens are transferred to the DPM instance associated with that claim. The DPM operates on a "virtual weight" (the amount of ABC staked in `VotingV2` for that submission), trusting `VotingV2`'s accounting.
++ *   **Share-Based Confidence Expression:** Confidence is represented by how a participant distributes "shares" across various outcome buckets within the DPM. This allows for nuanced expressions of belief regarding the claim's assessment.
++ *   **On-Chain Aggregation of Confidence:** After a submission period for a claim closes, the DPM contract is designed to compute the mean and standard deviation of all participant submissions. This calculation is based on their share distributions and their corresponding virtual weights, and occurs directly on the blockchain.
++
++ **Key Differentiators:**
++ 1.  **Internal Consensus as Resolution:** Unlike systems relying on external oracles to determine a "true" outcome for a prediction, this system's "resolution" for a claim *is* the aggregated confidence band (mean ± standard deviation) generated from participant inputs. The assessment of the claim is derived internally from the collective.
++ 2.  **Incentive Model:** The reward and slashing mechanism incentivizes participants to align their expressed confidence with what they anticipate the *final collective consensus* will be for that claim.
++ 3.  **No Token Custody by DPM:** The DPM serves as a calculation engine for share tracking and aggregation. It does not hold or manage participants' tokens. All staking, reward distribution, and slashing accounting are handled by the `VotingV2` contract, using the aggregated results from the DPM.
++ 4.  **Optional Source Provenance (via UMA):** The system can optionally integrate UMA's Optimistic Oracle. This integration is not for resolving the truth of the claim itself, but can be used for a distinct preliminary step: verifying the existence, authenticity, or provenance of the source material related to the claim being assessed. This is separate from the core confidence aggregation.
++
++ **Distinction from Simple Polling:**
++ *   **Stake-Weighted Submissions:** The influence of a confidence submission on the aggregate is proportional to the amount of tokens the participant dedicates to it.
++ *   **Nuanced Expression:** The share-based system allows for expressing confidence across a spectrum or distribution, rather than a binary choice.
++ *   **Incentivized Participation:** The reward/slashing mechanism is designed to encourage thoughtful engagement and alignment with the collective assessment.
++
++ ---
+
 System: Confidence-Based Prediction Market with UMA-Verified Sources
 
 Overview
