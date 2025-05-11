@@ -1,754 +1,576 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity 0.8.16;
 
-import "@openzeppelin/contracts/utils/math/Math.sol";
+import {Ownable} from "solady/src/auth/Ownable.sol"; // Staker likely inherits Ownable
+import {LibClone} from "solady/src/utils/LibClone.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
-import "./ResultComputationV2.sol";
-import "./Staker.sol";
-import "./VoteTiming.sol";
-import "./Constants.sol";
-
-import "../interfaces/MinimumVotingAncillaryInterface.sol";
-import "../interfaces/FinderInterface.sol";
-import "../interfaces/IdentifierWhitelistInterface.sol";
-import "../interfaces/OracleAncillaryInterface.sol";
-import "../interfaces/OracleGovernanceInterface.sol";
-import "../interfaces/OracleInterface.sol";
-import "../interfaces/VotingV2Interface.sol";
-import "../interfaces/RegistryInterface.sol";
-import "../interfaces/SlashingLibraryInterface.sol";
+import "./Staker.sol"; // Assuming Staker.sol is in the same directory
+import {OnitInfiniteOutcomeDPM, MarketConfig, MarketInitData} from "../../../OnitInfiniteOutcomeDPM.sol"; // Adjusted path
 
 /**
- * @title VotingV2 contract for the UMA DVM.
- * @dev Handles receiving and resolving price requests via a commit-reveal voting schelling scheme.
+ * @title VotingV2 contract - Refactored for Confidence-Based Prediction Market
+ * @dev Handles staking ABC tokens and creating topics (Onit DPM markets).
+ *      Manages user stakes, emissions, confidence submissions, and will manage
+ *      reward/slashing distribution based on confidence scores submitted to Onit DPM markets.
  */
-
-contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGovernanceInterface, VotingV2Interface {
-    using VoteTiming for VoteTiming.Data;
-    using ResultComputationV2 for ResultComputationV2.Data;
-
-    /****************************************
-     *        VOTING DATA STRUCTURES        *
-     ****************************************/
-
-    // Identifies a unique price request. Tracks ongoing votes as well as the result of the vote.
-    struct PriceRequest {
-        uint32 lastVotingRound; // Last round that this price request was voted on. Updated when a request is rolled.
-        bool isGovernance; // Denotes whether this is a governance request or not.
-        uint64 time; // Timestamp used when evaluating the request.
-        uint32 rollCount; // The number of rounds that a price request has rolled. Informs if a request can be deleted.
-        bytes32 identifier; // Identifier that defines how the voters should resolve the request.
-        mapping(uint32 => VoteInstance) voteInstances; // A map containing all votes for this price in various rounds.
-        bytes ancillaryData; // Additional data used to resolve the request.
-    }
-
-    struct VoteInstance {
-        mapping(address => VoteSubmission) voteSubmissions; // Maps (voter) to their submission.
-        ResultComputationV2.Data results; // The data structure containing the computed voting results.
-    }
-
-    struct VoteSubmission {
-        bytes32 commit; // A bytes32 of 0 indicates no commit or a commit that was already revealed.
-        bytes32 revealHash; // The hash of the value that was revealed. This is only used for computation of rewards.
-    }
-
-    struct Round {
-        SlashingLibraryInterface slashingLibrary; // Slashing library used to compute voter participation slash at this round.
-        uint128 minParticipationRequirement; // Minimum staked tokens that must vote to resolve a request.
-        uint128 minAgreementRequirement; // Minimum staked tokens that must agree on an outcome to resolve a request.
-        uint128 cumulativeStakeAtRound; // Total staked tokens at the start of the round.
-        uint32 numberOfRequestsToVote; // The number of requests to vote in this round.
-    }
-
-    struct SlashingTracker {
-        uint256 wrongVoteSlashPerToken; // The amount of tokens slashed per token staked for a wrong vote.
-        uint256 noVoteSlashPerToken; // The amount of tokens slashed per token staked for a no vote.
-        uint256 totalSlashed; // The total amount of tokens slashed for a given request.
-        uint256 totalCorrectVotes; // The total number of correct votes for a given request.
-        uint32 lastVotingRound; // The last round that this request was voted on (when it resolved).
-    }
-
-    enum VoteParticipation {
-        DidNotVote, // Voter did not vote.
-        WrongVote, // Voter voted against the resolved price.
-        CorrectVote // Voter voted with the resolved price.
-    }
-
-    // Represents the status a price request has.
-    enum RequestStatus {
-        NotRequested, // Was never requested.
-        Active, // Is being voted on in the current round.
-        Resolved, // Was resolved in a previous round.
-        Future, // Is scheduled to be voted on in a future round.
-        ToDelete // Is scheduled to be deleted.
-    }
-
-    // Only used as a return value in view methods -- never stored in the contract.
-    struct RequestState {
-        RequestStatus status;
-        uint32 lastVotingRound;
-    }
+contract VotingV2 is Staker {
+    // TODO: Re-evaluate if UINT64_MAX is needed after full refactoring. Staker or new logic might use it.
+    uint64 public constant UINT64_MAX = type(uint64).max;
 
     /****************************************
-     *            VOTING STATE              *
+     *        MARKET/TOPIC STATE            *
      ****************************************/
 
-    uint32 public lastRoundIdProcessed; // The last round pendingPriceRequestsIds were traversed in.
+    /// @notice Address of the OnitInfiniteOutcomeDPM implementation to be cloned for new topics.
+    address public onitDPMImplementation;
 
-    uint64 public nextPendingIndexToProcess; // Next pendingPriceRequestsIds index to process in lastRoundIdProcessed.
+    /// @notice Mapping from a topic ID (keccak256 of marketQuestion + initialLiquidity) to its DPM contract address.
+    mapping(bytes32 => address) public topicsMarketAddress;
 
-    FinderInterface public immutable finder; // Reference to the UMA Finder contract, used to find other UMA contracts.
+    /// @notice Mapping from a topic ID to its DPM market configuration.
+    mapping(bytes32 => OnitInfiniteOutcomeDPM.MarketConfig) public topicConfigs;
 
-    SlashingLibraryInterface public slashingLibrary; // Reference to Slashing Library, used to compute slashing amounts.
+    // Struct to store a user's total participation details for a specific topic
+    struct TopicParticipation {
+        uint256 totalStakeAmountABC; // Total ABC staked by the user for this topic across all their submissions
+        uint64 lastSubmissionTimestamp; // Timestamp of the latest submission by the user for this topic
+        bool rewardClaimed; // To track if rewards/slashes have been processed
+    }
 
-    VoteTiming.Data public voteTiming; // Vote timing library used to compute round timing related logic.
+    // Mapping: topicId -> userAddress -> participation details
+    mapping(bytes32 => mapping(address => TopicParticipation))
+        public userTopicParticipation;
 
-    OracleAncillaryInterface public immutable previousVotingContract; // Previous voting contract, if migrated.
+    // Mapping to track all topic IDs a user has participated in.
+    // Used by _updateTrackers to find relevant topics for a user.
+    mapping(address => bytes32[]) public userParticipatedTopicIds;
 
-    mapping(uint256 => Round) public rounds; // Maps round numbers to the rounds.
+    // Phases for a topic
+    enum TopicPhase {
+        Created, // Initial state, DPM might be uninitialized or pre-betting window
+        AcceptingConfidence, // Betting window is open for confidence submissions
+        AggregatingResults, // Betting cutoff passed, results being calculated/finalized
+        Settled // Results finalized, rewards/slashes can be claimed
+    }
 
-    mapping(bytes32 => PriceRequest) public priceRequests; // Maps price request IDs to the PriceRequest struct.
-
-    bytes32[] public resolvedPriceRequestIds; // Array of resolved price requestIds. Used to track resolved requests.
-
-    bytes32[] public pendingPriceRequestsIds; // Array of pending price requestIds. Can be resolved in the future.
-
-    uint32 public maxRolls; // The maximum number of times a request can roll before it is deleted automatically.
-
-    uint32 public maxRequestsPerRound; // The maximum number of requests that can be enqueued in a single round.
-
-    address public migratedAddress; // If non-zero, this contract has been migrated to this address.
-
-    uint128 public gat; // GAT: A minimum number of tokens that must participate to resolve a vote.
-
-    uint64 public spat; // SPAT: Minimum percentage of staked tokens that must agree on the answer to resolve a vote.
-
-    uint64 public constant UINT64_MAX = type(uint64).max; // Max value of an unsigned integer.
-
-    uint256 public constant ANCILLARY_BYTES_LIMIT = 8192; // Max length in bytes of ancillary data.
+    // Mapping: topicId -> current phase of the topic
+    mapping(bytes32 => TopicPhase) public topicPhase;
 
     /****************************************
      *                EVENTS                *
      ****************************************/
 
-    event VoteCommitted(
-        address indexed voter,
-        address indexed caller,
-        uint32 roundId,
-        bytes32 indexed identifier,
-        uint256 time,
-        bytes ancillaryData
+    event OnitDPMImplementationSet(address indexed newImplementation);
+    event TopicCreated(
+        bytes32 indexed topicId,
+        address indexed marketAddress,
+        address indexed creator,
+        string marketQuestion,
+        OnitInfiniteOutcomeDPM.MarketConfig config
+    );
+    event ConfidenceSubmitted(
+        bytes32 indexed topicId,
+        address indexed user,
+        uint256 additionalStakeAmountABC,
+        uint256 timestamp,
+        uint256 newTotalUserStakeForTopic // New field: user's new total stake for this topic
+    );
+    event TopicPhaseChanged(bytes32 indexed topicId, TopicPhase newPhase);
+    event UserTopicRewardApplied(
+        bytes32 indexed topicId,
+        address indexed user,
+        uint256 rewardAmount
+    );
+    event UserTopicSlashApplied(
+        bytes32 indexed topicId,
+        address indexed user,
+        uint256 slashAmount
     );
 
-    event EncryptedVote(
-        address indexed caller,
-        uint32 indexed roundId,
-        bytes32 indexed identifier,
-        uint256 time,
-        bytes ancillaryData,
-        bytes encryptedVote
+    /****************************************
+     *                ERRORS                *
+     ****************************************/
+    error OnitDPMImplementationNotSet();
+    error FailedToDeployTopicMarket();
+    error FailedToInitializeTopicMarket();
+    error InsufficientCreatorStake(); // For createTopic initialLiquidityABC
+    error TopicNotFound(bytes32 topicId);
+    error InvalidTopicPhaseForConfidence(
+        bytes32 topicId,
+        TopicPhase currentPhase
     );
-
-    event VoteRevealed(
-        address indexed voter,
-        address indexed caller,
-        uint32 roundId,
-        bytes32 indexed identifier,
-        uint256 time,
-        bytes ancillaryData,
-        int256 price,
-        uint128 numTokens
-    );
-
-    event RequestAdded(
-        address indexed requester,
-        uint32 indexed roundId,
-        bytes32 indexed identifier,
-        uint256 time,
-        bytes ancillaryData,
-        bool isGovernance
-    );
-
-    event RequestResolved(
-        uint32 indexed roundId,
-        uint256 indexed resolvedPriceRequestIndex,
-        bytes32 indexed identifier,
-        uint256 time,
-        bytes ancillaryData,
-        int256 price
-    );
-
-    event VotingContractMigrated(address newAddress);
-
-    event RequestDeleted(bytes32 indexed identifier, uint256 indexed time, bytes ancillaryData, uint32 rollCount);
-
-    event RequestRolled(bytes32 indexed identifier, uint256 indexed time, bytes ancillaryData, uint32 rollCount);
-
-    event GatAndSpatChanged(uint128 newGat, uint64 newSpat);
-
-    event SlashingLibraryChanged(address newAddress);
-
-    event MaxRollsChanged(uint32 newMaxRolls);
-
-    event MaxRequestsPerRoundChanged(uint32 newMaxRequestsPerRound);
-
-    event VoterSlashApplied(address indexed voter, int128 slashedTokens, uint128 postStake);
-
-    event VoterSlashed(address indexed voter, uint256 indexed requestIndex, int128 slashedTokens);
+    error InsufficientAvailableStake(uint256 required, uint256 available);
+    error StakeAmountMustBePositive();
+    error InvalidBucketOrShareData();
+    error DPMInteractionFailed();
+    error StakeAmountMismatchWithDPMCost();
+    error InitialLiquidityMismatchWithSharesCost();
 
     /**
      * @notice Construct the VotingV2 contract.
-     * @param _emissionRate amount of voting tokens that are emitted per second, split prorate between stakers.
-     * @param _unstakeCoolDown time that a voter must wait to unstake after requesting to unstake.
-     * @param _phaseLength length of the voting phases in seconds.
-     * @param _maxRolls number of times a vote must roll to be auto deleted by the DVM.
-     * @param _maxRequestsPerRound maximum number of requests that can be enqueued in a single round.
-     * @param _gat number of tokens that must participate to resolve a vote.
-     * @param _spat percentage of staked tokens that must agree on the result to resolve a vote.
-     * @param _votingToken address of the UMA token contract used to commit votes.
-     * @param _finder keeps track of all contracts within the system based on their interfaceName.
-     * @param _slashingLibrary contract used to calculate voting slashing penalties based on voter participation.
-     * @param _previousVotingContract previous voting contract address.
+     * @param _emissionRate amount of voting tokens (ABC) that are emitted per second, split prorata between stakers.
+     * @param _unstakeCoolDown time that a staker must wait to unstake after requesting to unstake.
+     * @param _votingToken address of the ABC token contract used for staking.
      */
     constructor(
         uint128 _emissionRate,
         uint64 _unstakeCoolDown,
-        uint64 _phaseLength,
-        uint32 _maxRolls,
-        uint32 _maxRequestsPerRound,
-        uint128 _gat,
-        uint64 _spat,
-        address _votingToken,
-        address _finder,
-        address _slashingLibrary,
-        address _previousVotingContract
+        address _votingToken
     ) Staker(_emissionRate, _unstakeCoolDown, _votingToken) {
-        voteTiming.init(_phaseLength);
-        finder = FinderInterface(_finder);
-        previousVotingContract = OracleAncillaryInterface(_previousVotingContract);
-        setGatAndSpat(_gat, _spat);
-        setSlashingLibrary(_slashingLibrary);
-        setMaxRequestPerRound(_maxRequestsPerRound);
-        setMaxRolls(_maxRolls);
-    }
-
-    /***************************************
-                    MODIFIERS
-    ****************************************/
-
-    modifier onlyRegisteredContract() {
-        _requireRegisteredContract();
-        _;
-    }
-
-    modifier onlyIfNotMigrated() {
-        _requireNotMigrated();
-        _;
+        // Ownable constructor is called by Staker's parent (likely OwnableUpgradeable or Ownable)
     }
 
     /****************************************
-     *  PRICE REQUEST AND ACCESS FUNCTIONS  *
+     *         ADMIN CONFIG FUNCTIONS       *
      ****************************************/
 
     /**
-     * @notice Enqueues a request (if a request isn't already present) for the identifier, time and ancillary data.
-     * @dev Time must be in the past and the identifier must be supported. The length of the ancillary data is limited.
-     * @param identifier uniquely identifies the price requested. E.g. BTC/USD (encoded as bytes32) could be requested.
-     * @param time unix timestamp for the price request.
-     * @param ancillaryData arbitrary data appended to a price request to give the voters more info from the caller.
+     * @notice Sets the address of the Onit DPM implementation contract.
+     * @dev Only callable by the owner.
+     * @param _implementation The address of the OnitInfiniteOutcomeDPM implementation.
      */
-    function requestPrice(
-        bytes32 identifier,
-        uint256 time,
-        bytes memory ancillaryData
-    ) public override nonReentrant onlyIfNotMigrated onlyRegisteredContract {
-        _requestPrice(identifier, time, ancillaryData, false);
-    }
-
-    /**
-     * @notice Enqueues a governance action request (if not already present) for identifier, time and ancillary data.
-     * @dev Only the owner of the Voting contract can call this. In normal operation this is the Governor contract.
-     * @param identifier uniquely identifies the price requested. E.g. Admin 0 (encoded as bytes32) could be requested.
-     * @param time unix timestamp for the price request.
-     * @param ancillaryData arbitrary data appended to a price request to give the voters more info from the caller.
-     */
-    function requestGovernanceAction(
-        bytes32 identifier,
-        uint256 time,
-        bytes memory ancillaryData
-    ) external override onlyOwner onlyIfNotMigrated {
-        _requestPrice(identifier, time, ancillaryData, true);
-    }
-
-    /**
-     * @notice Enqueues a request (if a request isn't already present) for the identifier, time pair.
-     * @dev Overloaded method to enable short term backwards compatibility when ancillary data is not included.
-     * @param identifier uniquely identifies the price requested. E.g. BTC/USD (encoded as bytes32) could be requested.
-     * @param time unix timestamp for the price request.
-     */
-    function requestPrice(bytes32 identifier, uint256 time) external override {
-        requestPrice(identifier, time, "");
-    }
-
-    // Enqueues a request (if a request isn't already present) for the given identifier, time and ancillary data.
-    function _requestPrice(
-        bytes32 identifier,
-        uint256 time,
-        bytes memory ancillaryData,
-        bool isGovernance
-    ) internal {
-        require(time <= getCurrentTime(), "Can only request in past");
-        require(isGovernance || _getIdentifierWhitelist().isIdentifierSupported(identifier), "Unsupported identifier");
-        require(ancillaryData.length <= ANCILLARY_BYTES_LIMIT, "Invalid ancillary data");
-
-        bytes32 priceRequestId = _encodePriceRequest(identifier, time, ancillaryData);
-        PriceRequest storage priceRequest = priceRequests[priceRequestId];
-
-        // Price has never been requested.
-        uint32 currentRoundId = getCurrentRoundId();
-        if (_getRequestStatus(priceRequest, currentRoundId) == RequestStatus.NotRequested) {
-            uint32 roundIdToVoteOn = getRoundIdToVoteOnRequest(currentRoundId + 1);
-            ++rounds[roundIdToVoteOn].numberOfRequestsToVote;
-            priceRequest.identifier = identifier;
-            priceRequest.time = uint64(time);
-            priceRequest.ancillaryData = ancillaryData;
-            priceRequest.lastVotingRound = roundIdToVoteOn;
-            if (isGovernance) priceRequest.isGovernance = isGovernance;
-
-            pendingPriceRequestsIds.push(priceRequestId);
-            emit RequestAdded(msg.sender, roundIdToVoteOn, identifier, time, ancillaryData, isGovernance);
-        }
-    }
-
-    /**
-     * @notice Gets the round ID that a request should be voted on.
-     * @param targetRoundId round ID to start searching for a round to vote on.
-     * @return uint32 round ID that a request should be voted on.
-     */
-    function getRoundIdToVoteOnRequest(uint32 targetRoundId) public view returns (uint32) {
-        while (rounds[targetRoundId].numberOfRequestsToVote >= maxRequestsPerRound) ++targetRoundId;
-        return targetRoundId;
-    }
-
-    /**
-     * @notice Returns whether the price for identifier, time and ancillary data is available.
-     * @param identifier uniquely identifies the price requested. E.g. BTC/USD (encoded as bytes32) could be requested.
-     * @param time unix timestamp of the price request.
-     * @param ancillaryData arbitrary data appended to a price request to give the voters more info from the caller.
-     * @return bool if the DVM has resolved to a price for the given identifier, timestamp and ancillary data.
-     */
-    function hasPrice(
-        bytes32 identifier,
-        uint256 time,
-        bytes memory ancillaryData
-    ) public view override onlyRegisteredContract returns (bool) {
-        (bool _hasPrice, , ) = _getPriceOrError(identifier, time, ancillaryData);
-        return _hasPrice;
-    }
-
-    /**
-     * @notice Whether the price for identifier and time is available.
-     * @dev Overloaded method to enable short term backwards compatibility when ancillary data is not included.
-     * @param identifier uniquely identifies the price requested. E.g. BTC/USD (encoded as bytes32) could be requested.
-     * @param time unix timestamp of the price request.
-     * @return bool if the DVM has resolved to a price for the given identifier and timestamp.
-     */
-    function hasPrice(bytes32 identifier, uint256 time) external view override returns (bool) {
-        return hasPrice(identifier, time, "");
-    }
-
-    /**
-     * @notice Gets the price for identifier, time and ancillary data if it has already been requested and resolved.
-     * @dev If the price is not available, the method reverts.
-     * @param identifier uniquely identifies the price requested. E.g. BTC/USD (encoded as bytes32) could be requested.
-     * @param time unix timestamp of the price request.
-     * @param ancillaryData arbitrary data appended to a price request to give the voters more info from the caller.
-     * @return int256 representing the resolved price for the given identifier, timestamp and ancillary data.
-     */
-    function getPrice(
-        bytes32 identifier,
-        uint256 time,
-        bytes memory ancillaryData
-    ) public view override onlyRegisteredContract returns (int256) {
-        (bool _hasPrice, int256 price, string memory message) = _getPriceOrError(identifier, time, ancillaryData);
-
-        // If the price wasn't available, revert with the provided message.
-        require(_hasPrice, message);
-        return price;
-    }
-
-    /**
-     * @notice Gets the price for identifier and time if it has already been requested and resolved.
-     * @dev Overloaded method to enable short term backwards compatibility when ancillary data is not included.
-     * @dev If the price is not available, the method reverts.
-     * @param identifier uniquely identifies the price requested. E.g. BTC/USD (encoded as bytes32) could be requested.
-     * @param time unix timestamp of the price request.
-     * @return int256 representing the resolved price for the given identifier and timestamp.
-     */
-    function getPrice(bytes32 identifier, uint256 time) external view override returns (int256) {
-        return getPrice(identifier, time, "");
-    }
-
-    /**
-     * @notice Gets the status of a list of price requests, identified by their identifier, time and ancillary data.
-     * @dev If the status for a particular request is NotRequested, the lastVotingRound will always be 0.
-     * @param requests array of pending requests which includes identifier, timestamp & ancillary data for the requests.
-     * @return requestStates a list, in the same order as the input list, giving the status of the specified requests.
-     */
-    function getPriceRequestStatuses(PendingRequestAncillary[] memory requests)
-        public
-        view
-        returns (RequestState[] memory)
-    {
-        RequestState[] memory requestStates = new RequestState[](requests.length);
-        uint32 currentRoundId = getCurrentRoundId();
-        for (uint256 i = 0; i < requests.length; i = unsafe_inc(i)) {
-            PriceRequest storage priceRequest =
-                _getPriceRequest(requests[i].identifier, requests[i].time, requests[i].ancillaryData);
-
-            RequestStatus status = _getRequestStatus(priceRequest, currentRoundId);
-
-            // If it's an active request, its true lastVotingRound is the current one, even if it hasn't been updated.
-            if (status == RequestStatus.Active) requestStates[i].lastVotingRound = currentRoundId;
-            else requestStates[i].lastVotingRound = priceRequest.lastVotingRound;
-            requestStates[i].status = status;
-        }
-        return requestStates;
-    }
-
-    /****************************************
-     *          VOTING FUNCTIONS            *
-     ****************************************/
-
-    /**
-     * @notice Commit a vote for a price request for identifier at time.
-     * @dev identifier, time must correspond to a price request that's currently in the commit phase.
-     * Commits can be changed.
-     * @dev Since transaction data is public, the salt will be revealed with the vote. While this is the system’s
-     * expected behavior, voters should never reuse salts. If someone else is able to guess the voted price and knows
-     * that a salt will be reused, then they can determine the vote pre-reveal.
-     * @param identifier uniquely identifies the committed vote. E.g. BTC/USD price pair.
-     * @param time unix timestamp of the price being voted on.
-     * @param ancillaryData arbitrary data appended to a price request to give the voters more info from the caller.
-     * @param hash keccak256 hash of the price, salt, voter address, time, ancillaryData, current roundId, identifier.
-     */
-    function commitVote(
-        bytes32 identifier,
-        uint256 time,
-        bytes memory ancillaryData,
-        bytes32 hash
-    ) public override nonReentrant {
-        uint32 currentRoundId = getCurrentRoundId();
-        address voter = getVoterFromDelegate(msg.sender);
-        _updateTrackers(voter);
-
-        require(hash != bytes32(0), "Invalid commit hash");
-        require(getVotePhase() == Phase.Commit, "Cannot commit in reveal phase");
-        PriceRequest storage priceRequest = _getPriceRequest(identifier, time, ancillaryData);
-        require(_getRequestStatus(priceRequest, currentRoundId) == RequestStatus.Active, "Request must be active");
-
-        priceRequest.voteInstances[currentRoundId].voteSubmissions[voter].commit = hash;
-
-        emit VoteCommitted(voter, msg.sender, currentRoundId, identifier, time, ancillaryData);
-    }
-
-    /**
-     * @notice Reveal a previously committed vote for identifier at time.
-     * @dev The revealed price, salt, voter address, time, ancillaryData, current roundId, identifier must hash to the
-     * latest hash that commitVote() was called with. Only the committer can reveal their vote.
-     * @param identifier voted on in the commit phase. E.g. BTC/USD price pair.
-     * @param time specifies the unix timestamp of the price being voted on.
-     * @param price voted on during the commit phase.
-     * @param ancillaryData arbitrary data appended to a price request to give the voters more info from the caller.
-     * @param salt value used to hide the commitment price during the commit phase.
-     */
-    function revealVote(
-        bytes32 identifier,
-        uint256 time,
-        int256 price,
-        bytes memory ancillaryData,
-        int256 salt
-    ) public override nonReentrant {
-        uint32 currentRoundId = getCurrentRoundId();
-        _freezeRoundVariables(currentRoundId);
-        VoteInstance storage voteInstance =
-            _getPriceRequest(identifier, time, ancillaryData).voteInstances[currentRoundId];
-        address voter = getVoterFromDelegate(msg.sender);
-        VoteSubmission storage voteSubmission = voteInstance.voteSubmissions[voter];
-
-        require(getVotePhase() == Phase.Reveal, "Reveal phase has not started yet"); // Can only reveal in reveal phase.
-
-        // Zero hashes are blocked in commit; they indicate a different error: voter did not commit or already revealed.
-        require(voteSubmission.commit != bytes32(0), "Invalid hash reveal");
-
-        // Check that the hash that was committed matches to the one that was revealed. Note that if the voter had
-        // then they must reveal with the same account they had committed with.
+    function setOnitDPMImplementation(
+        address _implementation
+    ) external onlyOwner {
         require(
-            keccak256(abi.encodePacked(price, salt, voter, time, ancillaryData, uint256(currentRoundId), identifier)) ==
-                voteSubmission.commit,
-            "Revealed data != commit hash"
+            _implementation != address(0),
+            "Implementation cannot be zero address"
         );
-
-        delete voteSubmission.commit; // Small gas refund for clearing up storage.
-        voteSubmission.revealHash = keccak256(abi.encode(price)); // Set the voter's submission.
-
-        // Calculate the voters effective stake for this round as the difference between their stake and pending stake.
-        // This allows for the voter to have staked during this reveal phase and not consider their pending stake.
-        uint128 effectiveStake = voterStakes[voter].stake - voterStakes[voter].pendingStakes[currentRoundId];
-        voteInstance.results.addVote(price, effectiveStake); // Add vote to the results.
-        emit VoteRevealed(voter, msg.sender, currentRoundId, identifier, time, ancillaryData, price, effectiveStake);
-    }
-
-    /**
-     * @notice Commits a vote and logs an event with a data blob, typically an encrypted version of the vote
-     * @dev An encrypted version of the vote is emitted in an event EncryptedVote to allow off-chain infrastructure to
-     * retrieve the commit. The contents of encryptedVote are never used on chain: it is purely for convenience.
-     * @param identifier unique price pair identifier. E.g. BTC/USD price pair.
-     * @param time unix timestamp of the price request.
-     * @param ancillaryData arbitrary data appended to a price request to give the voters more info from the caller.
-     * @param hash keccak256 hash of the price you want to vote for and a int256 salt.
-     * @param encryptedVote offchain encrypted blob containing the voter's amount, time and salt.
-     */
-    function commitAndEmitEncryptedVote(
-        bytes32 identifier,
-        uint256 time,
-        bytes memory ancillaryData,
-        bytes32 hash,
-        bytes memory encryptedVote
-    ) public override {
-        commitVote(identifier, time, ancillaryData, hash);
-        emit EncryptedVote(msg.sender, getCurrentRoundId(), identifier, time, ancillaryData, encryptedVote);
+        onitDPMImplementation = _implementation;
+        emit OnitDPMImplementationSet(_implementation);
     }
 
     /****************************************
-     *        VOTING GETTER FUNCTIONS       *
+     *        TOPIC MANAGEMENT FUNCTIONS    *
      ****************************************/
 
     /**
-     * @notice Gets the requests that are being voted on this round.
-     * @dev This view method returns requests with Active status that may be ahead of the stored contract state as this
-     * also filters out requests that would be resolvable or deleted if the resolvable requests were processed with the
-     * processResolvablePriceRequests() method.
-     * @return pendingRequests array containing identifiers of type PendingRequestAncillaryAugmented.
+     * @notice Create a new topic, which deploys an OnitInfiniteOutcomeDPM market.
+     * @param marketQuestion The unique question or identifier for the topic.
+     * @param bettingCutoff Timestamp when betting for this topic closes.
+     * @param outcomeUnit The unit size for outcome buckets in the DPM.
+     * @param marketUri A URI pointing to additional metadata about the market/topic.
+     * @param initialLiquidityABC Amount of ABC tokens the creator commits to this topic's DPM initial state.
+     *                            This amount will be committed from the creator's staked ABC.
+     * @param initialBucketIds Initial bucket IDs for seeding the market (DPM specific).
+     * @param initialShares Corresponding initial shares for the bucket IDs (DPM specific).
+     * @return marketAddress The address of the newly created Onit DPM market for the topic.
+     * @return topicId The unique ID for the created topic.
      */
-    function getPendingRequests() public view override returns (PendingRequestAncillaryAugmented[] memory) {
-        // Solidity memory arrays aren't resizable (and reading storage is expensive). Hence this hackery to filter
-        // pendingPriceRequestsIds only to those requests that have an Active RequestStatus.
-        PendingRequestAncillaryAugmented[] memory unresolved =
-            new PendingRequestAncillaryAugmented[](pendingPriceRequestsIds.length);
-        uint256 numUnresolved = 0;
-        uint32 currentRoundId = getCurrentRoundId();
+    function createTopic(
+        string memory marketQuestion,
+        uint256 bettingCutoff,
+        int256 outcomeUnit,
+        string memory marketUri,
+        uint256 initialLiquidityABC,
+        int256[] memory initialBucketIds,
+        int256[] memory initialShares
+    ) external returns (address marketAddress, bytes32 topicId) {
+        if (onitDPMImplementation == address(0)) {
+            revert OnitDPMImplementationNotSet();
+        }
 
-        for (uint256 i = 0; i < pendingPriceRequestsIds.length; i = unsafe_inc(i)) {
-            PriceRequest storage priceRequest = priceRequests[pendingPriceRequestsIds[i]];
-            if (_getRequestStatus(priceRequest, currentRoundId) == RequestStatus.Active) {
-                unresolved[numUnresolved] = PendingRequestAncillaryAugmented({
-                    lastVotingRound: priceRequest.lastVotingRound,
-                    isGovernance: priceRequest.isGovernance,
-                    time: priceRequest.time,
-                    rollCount: _getActualRollCount(priceRequest, currentRoundId),
-                    identifier: priceRequest.identifier,
-                    ancillaryData: priceRequest.ancillaryData
-                });
-                numUnresolved++;
+        address initiator = msg.sender;
+
+        if (initialBucketIds.length > 0) {
+            // Assuming if buckets are provided, shares are too and are meaningful
+            if (initialBucketIds.length != initialShares.length) {
+                revert InvalidBucketOrShareData();
+            }
+            if (initialLiquidityABC == 0) {
+                // If providing initial shares, liquidity must cover their cost.
+                revert InsufficientCreatorStake();
+            }
+            uint256 availableStakeForCreator = _getAvailableStake(initiator);
+            if (initialLiquidityABC > availableStakeForCreator) {
+                revert InsufficientAvailableStake(
+                    initialLiquidityABC,
+                    availableStakeForCreator
+                );
+            }
+
+            // Verify initialLiquidityABC matches the DPM's cost for the initial shares.
+            // This requires onitDPMImplementation to be set.
+            if (onitDPMImplementation == address(0)) {
+                revert OnitDPMImplementationNotSet(); // Should be caught earlier, but defensive
+            }
+            (int256 costDiffFromDPM, ) = OnitInfiniteOutcomeDPM(
+                payable(onitDPMImplementation)
+            ).calculateCostOfTrade(initialBucketIds, initialShares);
+            if (initialLiquidityABC != uint256(costDiffFromDPM)) {
+                revert InitialLiquidityMismatchWithSharesCost();
+            }
+            // Note: initialLiquidityABC is the creator's stake AT RISK for seeding the DPM.
+            // It's recorded in userTopicParticipation when/if the creator also makes a formal "submission"
+            // or if seeding itself is considered their first submission.
+            // The DPM will need to be adapted to use this initialLiquidityABC.
+        } else {
+            // No initial shares, initialLiquidityABC should ideally be 0 unless DPM has other uses for it.
+            if (initialLiquidityABC != 0) {
+                // Or handle this case if DPM can use initialLiquidityABC without initial shares.
+                revert("InitialLiquidityProvidedWithoutInitialShares");
             }
         }
 
-        PendingRequestAncillaryAugmented[] memory pendingRequests =
-            new PendingRequestAncillaryAugmented[](numUnresolved);
-        for (uint256 i = 0; i < numUnresolved; i = unsafe_inc(i)) pendingRequests[i] = unresolved[i];
+        address[] memory dpmResolvers = new address[](1);
+        dpmResolvers[0] = address(this); // VotingV2 can be a resolver for the DPM
 
-        return pendingRequests;
-    }
+        MarketConfig memory marketConfig = MarketConfig({
+            marketCreatorFeeReceiver: address(0), // No market creator fee in this system
+            marketCreatorCommissionBp: 0,
+            bettingCutoff: bettingCutoff,
+            withdrawlDelayPeriod: 0, // To be defined if needed for confidence market settlement
+            outcomeUnit: outcomeUnit,
+            marketQuestion: marketQuestion,
+            marketUri: marketUri,
+            resolvers: dpmResolvers
+        });
 
-    /**
-     * @notice Checks if there are current active requests.
-     * @return bool true if there are active requests, false otherwise.
-     */
-    function currentActiveRequests() public view returns (bool) {
-        uint32 currentRoundId = getCurrentRoundId();
-        for (uint256 i = 0; i < pendingPriceRequestsIds.length; i = unsafe_inc(i))
-            if (_getRequestStatus(priceRequests[pendingPriceRequestsIds[i]], currentRoundId) == RequestStatus.Active)
-                return true;
+        // CRITICAL DPM ADAPTATION REQUIRED:
+        // The DPM's initialize function calculates: `initialBetValue = msg.value - initData.seededFunds;`
+        // We are calling with `msg.value = 0`.
+        // The `initialLiquidityABC` should be used by the DPM to set its initial state.
+        // This requires OnitInfiniteOutcomeDPM.initialize to be adapted to accept an ABC value.
+        // We will pass initialLiquidityABC via initData.seededFunds.
+        MarketInitData memory marketInitData = MarketInitData({
+            onitFactory: address(this), // VotingV2 acts as the factory/admin for the DPM
+            initiator: initiator,
+            seededFunds: initialLiquidityABC, // Pass initialLiquidityABC as seededFunds for DPM
+            config: marketConfig,
+            initialBucketIds: initialBucketIds,
+            initialShares: initialShares
+        });
 
-        return false;
-    }
+        bytes memory encodedInitData = abi.encodeWithSelector(
+            OnitInfiniteOutcomeDPM.initialize.selector,
+            marketInitData
+        );
 
-    /**
-     * @notice Returns the current voting phase, as a function of the current time.
-     * @return Phase to indicate the current phase. Either { Commit, Reveal, NUM_PHASES }.
-     */
-    function getVotePhase() public view override returns (Phase) {
-        return Phase(uint256(voteTiming.computeCurrentPhase(getCurrentTime())));
-    }
+        // Salt includes parameters that define the market's uniqueness.
+        // Using initialLiquidityABC in salt ensures unique address if other params are same but liquidity differs.
+        bytes32 salt = keccak256(
+            abi.encode(
+                address(this), // Deployer context
+                initiator,
+                marketConfig.bettingCutoff,
+                marketConfig.marketQuestion,
+                initialLiquidityABC // Creator's ABC commitment for DPM seeding
+            )
+        );
 
-    /**
-     * @notice Returns the current round ID, as a function of the current time.
-     * @return uint32 the unique round ID.
-     */
-    function getCurrentRoundId() public view override returns (uint32) {
-        return uint32(voteTiming.computeCurrentRoundId(getCurrentTime()));
-    }
+        address clonedMarketAddress = LibClone.cloneDeterministic(
+            onitDPMImplementation,
+            salt
+        );
 
-    /**
-     * @notice Returns the round end time, as a function of the round number.
-     * @param roundId representing the unique round ID.
-     * @return uint256 representing the round end time.
-     */
-    function getRoundEndTime(uint256 roundId) external view returns (uint256) {
-        return voteTiming.computeRoundEndTime(roundId);
-    }
+        // Call DPM initialize. msg.value is 0. DPM must be adapted for ABC liquidity.
+        (bool success, bytes memory returnData) = clonedMarketAddress.call{
+            value: 0
+        }(encodedInitData);
 
-    /**
-     * @notice Returns the number of current pending price requests to be voted and the number of resolved price
-       requests over all time.
-     * @dev This method might return stale values if the state of the contract has changed since the last time
-       `processResolvablePriceRequests()` was called. To get the most up-to-date values, call
-       `getNumberOfPriceRequestsPostUpdate()` instead.
-     * @return numberPendingPriceRequests the total number of pending prices requests.
-     * @return numberResolvedPriceRequests the total number of prices resolved over all time.
-     */
-    function getNumberOfPriceRequests()
-        public
-        view
-        returns (uint256 numberPendingPriceRequests, uint256 numberResolvedPriceRequests)
-    {
-        return (pendingPriceRequestsIds.length, resolvedPriceRequestIds.length);
-    }
+        if (!success) {
+            if (returnData.length > 0) {
+                assembly {
+                    let returnDataSize := mload(returnData)
+                    revert(add(32, returnData), returnDataSize)
+                }
+            }
+            revert FailedToDeployTopicMarket();
+        }
 
-    /**
-     * @notice Returns the number of current pending price requests to be voted and the number of resolved price
-       requests over all time after processing any resolvable price requests.
-     * @return numberPendingPriceRequests the total number of pending prices requests.
-     * @return numberResolvedPriceRequests the total number of prices resolved over all time.
-     */
-    function getNumberOfPriceRequestsPostUpdate()
-        external
-        returns (uint256 numberPendingPriceRequests, uint256 numberResolvedPriceRequests)
-    {
-        processResolvablePriceRequests();
-        return getNumberOfPriceRequests();
-    }
+        // Verify DPM initialization (e.g., factory address set correctly)
+        address checkOnitFactory = OnitInfiniteOutcomeDPM(
+            payable(clonedMarketAddress)
+        ).onitFactory();
+        if (checkOnitFactory != address(this)) {
+            revert FailedToInitializeTopicMarket();
+        }
 
-    /**
-     * @notice Returns aggregate slashing trackers for a given request index.
-     * @param requestIndex requestIndex the index of the request to fetch slashing trackers for.
-     * @return SlashingTracker Tracker object contains the slashed UMA per staked UMA per wrong vote and no vote, the
-     * total UMA slashed in the round and the total number of correct votes in the round.
-     */
-    function requestSlashingTrackers(uint256 requestIndex) public view returns (SlashingTracker memory) {
-        PriceRequest storage priceRequest = priceRequests[resolvedPriceRequestIds[requestIndex]];
-        uint32 lastVotingRound = priceRequest.lastVotingRound;
-        VoteInstance storage voteInstance = priceRequest.voteInstances[lastVotingRound];
+        marketAddress = clonedMarketAddress;
+        // topicId should be unique. Using the same elements as salt for consistency.
+        topicId = salt; // Or re-calculate if salt has deployer-specific elements not part of topic identity
 
-        uint256 totalVotes = voteInstance.results.totalVotes;
-        uint256 totalCorrectVotes = voteInstance.results.getTotalCorrectlyVotedTokens();
-        uint256 totalStaked = rounds[lastVotingRound].cumulativeStakeAtRound;
+        topicsMarketAddress[topicId] = marketAddress;
+        topicConfigs[topicId] = marketConfig;
+        topicPhase[topicId] = TopicPhase.AcceptingConfidence; // Set initial phase
 
-        (uint256 wrongVoteSlash, uint256 noVoteSlash) =
-            rounds[lastVotingRound].slashingLibrary.calcSlashing(
-                totalStaked,
-                totalVotes,
-                totalCorrectVotes,
-                requestIndex,
-                priceRequest.isGovernance
+        // Authorize VotingV2 to call `vote` on the DPM
+        OnitInfiniteOutcomeDPM(payable(marketAddress)).initializeVotinContract(
+            address(this)
+        );
+
+        // If initial liquidity was provided by the creator, record it as their first participation/commitment for this topic.
+        if (initialLiquidityABC > 0) {
+            TopicParticipation storage participation = userTopicParticipation[
+                topicId
+            ][initiator];
+            participation.totalStakeAmountABC = initialLiquidityABC;
+            participation.lastSubmissionTimestamp = SafeCast.toUint64(
+                block.timestamp
             );
+            // Add topic to creator's list of participated topics if not already
+            bool found = false;
+            for (
+                uint i = 0;
+                i < userParticipatedTopicIds[initiator].length;
+                i++
+            ) {
+                if (userParticipatedTopicIds[initiator][i] == topicId) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                userParticipatedTopicIds[initiator].push(topicId);
+            }
+            // Note: This initialLiquidityABC is now "at risk" for the creator on this topic.
+        }
 
-        uint256 totalSlashed =
-            ((noVoteSlash * (totalStaked - totalVotes)) + (wrongVoteSlash * (totalVotes - totalCorrectVotes))) / 1e18;
+        emit TopicCreated(
+            topicId,
+            marketAddress,
+            initiator,
+            marketQuestion,
+            marketConfig
+        );
+        emit TopicPhaseChanged(topicId, TopicPhase.AcceptingConfidence);
 
-        return SlashingTracker(wrongVoteSlash, noVoteSlash, totalSlashed, totalCorrectVotes, lastVotingRound);
+        return (marketAddress, topicId);
     }
 
     /**
-     * @notice Returns the voter's participation in the vote for a given request index.
-     * @param requestIndex requestIndex the index of the request to fetch slashing trackers for.
-     * @param lastVotingRound the round to get voter participation for.
-     * @param voter the voter to get participation for.
-     * @return VoteParticipation enum representing the voter's participation in the vote.
+     * @notice Predicts the address where a topic's market will be deployed.
+     * @param initiator The address that will initiate the topic creation.
+     * @param marketQuestion The unique question or identifier for the topic.
+     * @param marketBettingCutoff Timestamp when betting for the topic will close.
+     * @param initialLiquidityABC Total amount of ABC tokens the creator commits for DPM seeding.
+     * @return address The predicted address of the Onit DPM market.
      */
-    function getVoterParticipation(
-        uint256 requestIndex,
-        uint32 lastVotingRound,
-        address voter
-    ) public view returns (VoteParticipation) {
-        VoteInstance storage voteInstance =
-            priceRequests[resolvedPriceRequestIds[requestIndex]].voteInstances[lastVotingRound];
-        bytes32 revealHash = voteInstance.voteSubmissions[voter].revealHash;
-        if (revealHash == bytes32(0)) return VoteParticipation.DidNotVote;
-        if (voteInstance.results.wasVoteCorrect(revealHash)) return VoteParticipation.CorrectVote;
-        return VoteParticipation.WrongVote;
-    }
+    function predictTopicMarketAddress(
+        address initiator,
+        string memory marketQuestion,
+        uint256 marketBettingCutoff,
+        uint256 initialLiquidityABC
+    ) public view returns (address) {
+        if (onitDPMImplementation == address(0)) {
+            revert OnitDPMImplementationNotSet();
+        }
 
-    /****************************************
-     *        OWNER ADMIN FUNCTIONS         *
-     ****************************************/
+        bytes32 salt = keccak256(
+            abi.encode(
+                address(this),
+                initiator,
+                marketBettingCutoff,
+                marketQuestion,
+                initialLiquidityABC
+            )
+        );
 
-    /**
-     * @notice Disables this Voting contract in favor of the migrated one.
-     * @dev Can only be called by the contract owner.
-     * @param newVotingAddress the newly migrated contract address.
-     */
-    function setMigrated(address newVotingAddress) external override onlyOwner {
-        migratedAddress = newVotingAddress;
-        emit VotingContractMigrated(newVotingAddress);
-    }
-
-    /**
-     * @notice Sets the maximum number of rounds to roll a request can have before the DVM auto deletes it.
-     * @dev Can only be called by the contract owner.
-     * @param newMaxRolls the new number of rounds to roll a request before the DVM auto deletes it.
-     */
-    function setMaxRolls(uint32 newMaxRolls) public override onlyOwner {
-        // Changes to max rolls can impact unresolved requests. To protect against this process requests first.
-        processResolvablePriceRequests();
-        maxRolls = newMaxRolls;
-        emit MaxRollsChanged(newMaxRolls);
+        return
+            LibClone.predictDeterministicAddress(
+                onitDPMImplementation,
+                salt,
+                address(this) // Deployer of the clone is this contract
+            );
     }
 
     /**
-     * @notice Sets the maximum number of requests that can be made in a single round. Used to bound the maximum
-     * sequential slashing that can be applied within a single round.
-     * @dev Can only be called by the contract owner.
-     * @param newMaxRequestsPerRound the new maximum number of requests that can be made in a single round.
+     * @notice Submits a confidence score for a given topic, staking a specified amount of ABC tokens.
+     * @param topicId The ID of the topic to submit confidence for.
+     * @param additionalStakeAmountABC The amount of ABC tokens to additionally stake with this submission.
+     * @param bucketIds The bucket IDs for the DPM trade.
+     * @param shares The shares for the DPM trade.
      */
-    function setMaxRequestPerRound(uint32 newMaxRequestsPerRound) public override onlyOwner {
-        require(newMaxRequestsPerRound > 0);
-        maxRequestsPerRound = newMaxRequestsPerRound;
-        emit MaxRequestsPerRoundChanged(newMaxRequestsPerRound);
+    function submitConfidence(
+        bytes32 topicId,
+        uint256 additionalStakeAmountABC,
+        int256[] memory bucketIds,
+        int256[] memory shares
+    ) external nonReentrant {
+        address user = msg.sender;
+        address marketAddress = topicsMarketAddress[topicId];
+
+        // 1. Check topic existence and phase
+        if (marketAddress == address(0)) {
+            revert TopicNotFound(topicId);
+        }
+        if (topicPhase[topicId] != TopicPhase.AcceptingConfidence) {
+            revert InvalidTopicPhaseForConfidence(topicId, topicPhase[topicId]);
+        }
+        // Redundant check if phase transition is robust, but good for defense:
+        OnitInfiniteOutcomeDPM.MarketConfig storage config = topicConfigs[
+            topicId
+        ];
+        if (
+            config.bettingCutoff != 0 && block.timestamp >= config.bettingCutoff
+        ) {
+            // This should ideally be caught by phase management (tryAdvanceTopicPhase)
+            revert InvalidTopicPhaseForConfidence(topicId, topicPhase[topicId]);
+        }
+
+        // 4. Validate additionalStakeAmountABC and bucket/share data
+        if (additionalStakeAmountABC == 0) {
+            revert StakeAmountMustBePositive();
+        }
+        if (bucketIds.length != shares.length || bucketIds.length == 0) {
+            revert InvalidBucketOrShareData();
+        }
+
+        // 5. Check available stake for this specific topic
+        uint256 availableForThisTopic = getAvailableStakeForTopic(
+            topicId,
+            user
+        );
+        if (additionalStakeAmountABC > availableForThisTopic) {
+            revert InsufficientAvailableStake(
+                additionalStakeAmountABC,
+                availableForThisTopic
+            );
+        }
+
+        // 6. DPM Interaction - Calculate cost and verify against user's intended stake
+        // CRITICAL: This interaction assumes OnitInfiniteOutcomeDPM is adapted.
+        OnitInfiniteOutcomeDPM dpm = OnitInfiniteOutcomeDPM(
+            payable(marketAddress)
+        );
+        (int256 costDiffFromDPM, ) = dpm.calculateCostOfTrade(
+            bucketIds,
+            shares
+        );
+
+        if (additionalStakeAmountABC != uint256(costDiffFromDPM)) {
+            revert StakeAmountMismatchWithDPMCost();
+        }
+
+        // Hypothetical DPM call:
+        // This call is essential for the DPM to record the user's shares and use `additionalStakeAmountABC`.
+        // The DPM's `vote` function needs to be adapted to be callable by VotingV2 on behalf of `user`,
+        // accept `additionalStakeAmountABC` (as ABC tokens), and attribute shares to `user`.
+        // For example, a new function `voteForUser(address user, uint256 abcAmount, int256[] memory bucketIds, int256[] memory shares)`
+        // might be needed in the DPM.
+        // For now, we assume this interaction would succeed and VotingV2 transfers the ABC tokens to the DPM.
+        // The DPM would then use this amount in its internal accounting.
+        // votingToken.transferFrom(user, marketAddress, additionalStakeAmountABC); // Example transfer if DPM holds ABC
+        // try dpm.voteForUser(user, additionalStakeAmountABC, bucketIds, shares) { }
+        // catch {
+        //    revert DPMInteractionFailed();
+        // }
+        //
+        // Given the current DPM structure, it expects msg.value for ETH or direct token transfers for ERC20s.
+        // The `vote` function in DPM is `onlyVotingContract` and uses `votingPower[msg.sender]`.
+        // This `votingPower` would need to be set by VotingV2 for the DPM before calling `dpm.vote()`.
+        // This requires significant DPM adaptation.
+        // For now, we proceed with VotingV2 state changes, assuming DPM call would succeed.
+
+        // 7. Update VotingV2 participation state
+        TopicParticipation storage participation = userTopicParticipation[
+            topicId
+        ][user];
+        if (participation.lastSubmissionTimestamp == 0) {
+            // First submission for this topic by this user, add to their list
+            bool found = false;
+            for (uint i = 0; i < userParticipatedTopicIds[user].length; i++) {
+                if (userParticipatedTopicIds[user][i] == topicId) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                userParticipatedTopicIds[user].push(topicId);
+            }
+        }
+        participation.totalStakeAmountABC += additionalStakeAmountABC;
+        participation.lastSubmissionTimestamp = SafeCast.toUint64(
+            block.timestamp
+        );
+
+        // Emit event
+        emit ConfidenceSubmitted(
+            topicId,
+            user,
+            additionalStakeAmountABC,
+            block.timestamp,
+            participation.totalStakeAmountABC // Emit new total for this user on this topic
+        );
+
+        // CRITICAL: If the DPM interaction (which is currently commented out/hypothetical) were to fail,
+        // any state changes specific to this function call (like updates to `userTopicParticipation`) would need to be reverted.
+        // The `totalCommittedStake` is no longer managed this way.
     }
 
     /**
-     * @notice Resets the GAT number and SPAT percentage. GAT is the minimum number of tokens that must participate in a
-     * vote for it to resolve (quorum number). SPAT is the minimum percentage of tokens that must agree on a result
-     * for it to resolve (percentage of staked tokens) This change only applies to subsequent rounds.
-     * @param newGat sets the next round's GAT and going forward.
-     * @param newSpat sets the next round's SPAT and going forward.
+     * @notice Advances the phase of a topic, e.g., from AcceptingConfidence to AggregatingResults.
+     * @dev This is a basic version. Conditions for phase transitions need to be robustly defined,
+     *      especially for AggregatingResults -> Settled, which depends on DPM outcome finalization.
+     *      This function is expected to be called externally, e.g., by a keeper.
+     * @param topicId The ID of the topic to advance.
      */
-    function setGatAndSpat(uint128 newGat, uint64 newSpat) public override onlyOwner {
-        require(newGat < votingToken.totalSupply() && newGat > 0);
-        require(newSpat > 0 && newSpat < 1e18);
-        gat = newGat;
-        spat = newSpat;
+    function tryAdvanceTopicPhase(bytes32 topicId) external {
+        if (topicsMarketAddress[topicId] == address(0)) {
+            revert TopicNotFound(topicId);
+        }
+        TopicPhase currentPhase = topicPhase[topicId];
+        OnitInfiniteOutcomeDPM.MarketConfig storage config = topicConfigs[
+            topicId
+        ];
+        address marketAddress = topicsMarketAddress[topicId]; // Get market address
 
-        emit GatAndSpatChanged(newGat, newSpat);
-    }
+        if (currentPhase == TopicPhase.AcceptingConfidence) {
+            if (
+                config.bettingCutoff != 0 &&
+                block.timestamp >= config.bettingCutoff
+            ) {
+                topicPhase[topicId] = TopicPhase.AggregatingResults;
+                emit TopicPhaseChanged(topicId, TopicPhase.AggregatingResults);
 
-    /**
-     * @notice Changes the slashing library used by this contract.
-     * @param _newSlashingLibrary new slashing library address.
-     */
-    function setSlashingLibrary(address _newSlashingLibrary) public override onlyOwner {
-        slashingLibrary = SlashingLibraryInterface(_newSlashingLibrary);
-        emit SlashingLibraryChanged(_newSlashingLibrary);
+                // HYPOTHETICAL: Tell DPM to finalize its internal calculations if needed.
+                // This depends on DPM design. It might auto-finalize or need a trigger.
+                // Example:
+                // try OnitInfiniteOutcomeDPM(payable(marketAddress)).startAggregation() {}
+                // catch { /* Handle error if DPM fails to start aggregation */ }
+            }
+        } else if (currentPhase == TopicPhase.AggregatingResults) {
+            // Condition for moving to Settled: DPM aggregation is complete.
+            // HYPOTHETICAL: Check if DPM has finished its calculations.
+            bool dpmAggregationComplete = false; // Default to false
+            // Example:
+            // try OnitInfiniteOutcomeDPM(payable(marketAddress)).isAggregationComplete() returns (bool complete) {
+            //     dpmAggregationComplete = complete;
+            // } catch { /* Handle error if DPM check fails */ }
+
+            // For now, let's assume if it's in AggregatingResults, and some time has passed,
+            // or a DPM flag is set, it can move to Settled.
+            // This is a placeholder for a real condition.
+            // For testing, one might allow an owner to push it to Settled, or use a DPM flag.
+            // If DPM emits an event "AggregationCompleted", an off-chain keeper could call this.
+
+            // For the purpose of this exercise, let's assume a DPM view function.
+            // If `OnitInfiniteOutcomeDPM` has a `resolvedAtTimestamp` which is set when its internal
+            // aggregation is done (similar to its current `resolveMarket`), we could check that.
+            // The current DPM's `resolvedAtTimestamp` is set by `resolveMarket`.
+            // We need an equivalent for confidence aggregation.
+            // Let's assume a hypothetical `aggregationFinalizedTimestamp` on the DPM.
+            uint256 dpmFinalizedTime = OnitInfiniteOutcomeDPM(payable(marketAddress)).resolvedAtTimestamp(); // Using existing field as placeholder
+
+            if (dpmFinalizedTime > 0 && dpmFinalizedTime >= config.bettingCutoff) { // Ensure it was finalized after betting
+                dpmAggregationComplete = true; // Placeholder logic
+            }
+
+            if (dpmAggregationComplete) {
+                topicPhase[topicId] = TopicPhase.Settled;
+                emit TopicPhaseChanged(topicId, TopicPhase.Settled);
+            }
+        }
+        // Other phase transitions can be added as needed.
     }
 
     /****************************************
      *          STAKING FUNCTIONS           *
+     * (Overrides and new logic for rewards/slashing) *
      ****************************************/
 
-    /**
-     * @notice Updates the voter's trackers for staking and slashing. Applies all unapplied slashing to given staker.
+    /* @notice Updates the voter's trackers for staking and slashing. Applies all unapplied slashing to given staker.
      * @dev Can be called by anyone, but it is not necessary for the contract to function is run the other functions.
      * @param voter address of the voter to update the trackers for.
      */
@@ -757,404 +579,204 @@ contract VotingV2 is Staker, OracleInterface, OracleAncillaryInterface, OracleGo
     }
 
     /**
-     * @notice Updates the voter's trackers for staking and voting, specifying a maximum number of resolved requests to
-     * traverse. This function can be used in place of updateTrackers to process the trackers in batches, hence avoiding
-     * potential issues if the number of elements to be processed is large and the associated gas cost is too high.
-     * @param voter address of the voter to update the trackers for.
-     * @param maxTraversals maximum number of resolved requests to traverse in this call.
+     * @notice Updates the staker's trackers for staking and applies rewards/slashing from closed topics.
+     * @dev This function is intended to be repurposed from its UMA DVM functionality.
+     *      The internal logic will need to iterate through topics the user participated in
+     *      that have closed, determine if their confidence submission was in-band or out-of-band,
+     *      and then apply rewards or slashes from the Staker contract's perspective.
+     * @param staker address of the staker to update the trackers for.
      */
-    function updateTrackersRange(address voter, uint64 maxTraversals) external {
-        processResolvablePriceRequests();
-        _updateAccountSlashingTrackers(voter, maxTraversals);
-    }
+    function _updateTrackers(address staker) internal override {
+        // Process settled topics for rewards/slashes before updating Staker's core rewards.
+        // Use a reasonable default for maxTraversals, e.g., 5 or 10.
+        // This could also be a configurable value.
+        _updateUserTopicResults(staker, 5); // Process up to 5 topics
 
-    // Updates the global and selected wallet's trackers for staking and voting. Note that the order of these calls is
-    // very important due to the interplay between slashing and inactive/active liquidity.
-    function _updateTrackers(address voter) internal override {
-        processResolvablePriceRequests();
-        _updateAccountSlashingTrackers(voter, UINT64_MAX);
-        super._updateTrackers(voter);
+        // For now, just call super to maintain Staker's core accounting (emissions).
+        super._updateTrackers(staker);
     }
 
     /**
-     * @notice Process and resolve all resolvable price requests. This function traverses all pending price requests and
-     *  resolves them if they are resolvable. It also rolls and deletes requests, if required.
+     * @notice Computes pending stakes. In this refactored system, UMA-style round-based pending stakes
+     * are not used. This function provides a no-op implementation to satisfy the Staker contract's
+     * virtual function requirement.
+     * @param voter The address of the voter (unused).
+     * @param amount The amount being staked (unused).
      */
-    function processResolvablePriceRequests() public {
-        _processResolvablePriceRequests(UINT64_MAX);
-    }
-
-    /**
-     * @notice Process and resolve all resolvable price requests. This function traverses all pending price requests and
-     * resolves them if they are resolvable. It also rolls and deletes requests, if required. This function can be used
-     * in place of processResolvablePriceRequests to process the requests in batches, hence avoiding potential issues if
-     * the number of elements to be processed is large and the associated gas cost is too high.
-     * @param maxTraversals maximum number of resolved requests to traverse in this call.
-     */
-    function processResolvablePriceRequestsRange(uint64 maxTraversals) external {
-        _processResolvablePriceRequests(maxTraversals);
-    }
-
-    // Starting index for a staker is the first value that nextIndexToProcess is set to and defines the first index that
-    // a staker is suspectable to receiving slashing on. This is set to current length of the resolvedPriceRequestIds.
-    // Note first call processResolvablePriceRequests to ensure that the resolvedPriceRequestIds array is up to date.
-    function _getStartingIndexForStaker() internal override returns (uint64) {
-        processResolvablePriceRequests();
-        return SafeCast.toUint64(resolvedPriceRequestIds.length);
-    }
-
-    // Checks if we are in an active voting reveal phase (currently revealing votes). This impacts if a new staker's
-    // stake should be activated immediately or if it should be frozen until the end of the reveal phase.
-    function _inActiveReveal() internal view override returns (bool) {
-        return (currentActiveRequests() && getVotePhase() == Phase.Reveal);
-    }
-
-    // This function must be called before any tokens are staked. It updates the voter's pending stakes to reflect the
-    // new amount to stake. These updates are only made if we are in an active reveal. This is required to appropriately
-    // calculate a voter's trackers and avoid slashing them for amounts staked during an active reveal phase.
-    function _computePendingStakes(address voter, uint128 amount) internal override {
-        if (_inActiveReveal()) {
-            uint32 currentRoundId = getCurrentRoundId();
-            // Freeze round variables to prevent cumulativeActiveStakeAtRound from changing based on the stakes during
-            // the active reveal phase. This will happen if the first action within the reveal is someone staking.
-            _freezeRoundVariables(currentRoundId);
-            // Increment pending stake for voter by amount. With the omission of stake from cumulativeActiveStakeAtRound
-            // for this round, ensure that the pending stakes is not included in the slashing calculation for this round.
-            _incrementPendingStake(voter, currentRoundId, amount);
-        }
-    }
-
-    // Updates the slashing trackers of a given account based on previous voting activity. This traverses all resolved
-    // requests for each voter and for each request checks if the voter voted correctly or not. Based on the voters
-    // voting activity the voters balance is updated accordingly. The caller can provide a maxTraversals parameter to
-    // limit the number of resolved requests to traverse in this call to bound the gas used. Note each iteration of
-    // this function re-uses a fresh slash variable to produce useful logs on the amount a voter is slashed.
-    function _updateAccountSlashingTrackers(address voter, uint64 maxTraversals) internal {
-        VoterStake storage voterStake = voterStakes[voter];
-        uint64 requestIndex = voterStake.nextIndexToProcess; // Traverse all requests from the last considered request.
-
-        // Traverse all elements within the resolvedPriceRequestIds array and update the voter's trackers according to
-        // their voting activity. Bound the number of iterations to the maxTraversals parameter to cap the gas used.
-        while (requestIndex < resolvedPriceRequestIds.length && maxTraversals > 0) {
-            maxTraversals = unsafe_dec_64(maxTraversals); // reduce the number of traversals left & re-use the prop.
-
-            // Get the slashing for this request. This comes from the slashing library and informs to the voter slash.
-            SlashingTracker memory trackers = requestSlashingTrackers(requestIndex);
-
-            // Use the effective stake as the difference between the current stake and pending stake. The staker will
-            //have a pending stake if they staked during an active reveal for the voting round in question.
-            uint256 effectiveStake = voterStake.stake - voterStake.pendingStakes[trackers.lastVotingRound];
-            int256 slash; // The amount to slash the voter by for this request. Reset on each entry to emit useful logs.
-
-            // Get the voter participation for this request. This informs if the voter voted correctly or not.
-            VoteParticipation participation = getVoterParticipation(requestIndex, trackers.lastVotingRound, voter);
-
-            // The voter did not reveal or did not commit. Slash at noVote rate.
-            if (participation == VoteParticipation.DidNotVote)
-                slash = -int256(Math.ceilDiv(effectiveStake * trackers.noVoteSlashPerToken, 1e18));
-
-                // The voter did not vote with the majority. Slash at wrongVote rate.
-            else if (participation == VoteParticipation.WrongVote)
-                slash = -int256(Math.ceilDiv(effectiveStake * trackers.wrongVoteSlashPerToken, 1e18));
-
-                // Else, the voter voted correctly. Receive a pro-rate share of the other voters slash.
-            else slash = int256((effectiveStake * trackers.totalSlashed) / trackers.totalCorrectVotes);
-
-            emit VoterSlashed(voter, requestIndex, int128(slash));
-            voterStake.unappliedSlash += int128(slash);
-
-            // If the next round is different to the current considered round, apply the slash to the voter.
-            if (isNextRequestRoundDifferent(requestIndex)) _applySlashToVoter(voterStake, voter);
-
-            requestIndex = unsafe_inc_64(requestIndex); // Increment the request index.
-        }
-
-        // Set the account's nextIndexToProcess to the requestIndex so the next entry starts where we left off.
-        voterStake.nextIndexToProcess = requestIndex;
-    }
-
-    // Applies a given slash to a given voter's stake. In the event the sum of the slash and the voter's stake is less
-    // than 0, the voter's stake is set to 0 to prevent the voter's stake from going negative. unappliedSlash tracked
-    // all slashing the staker has received but not yet applied to their stake. Apply it then set it to zero.
-    function _applySlashToVoter(VoterStake storage voterStake, address voter) internal {
-        if (voterStake.unappliedSlash + int128(voterStake.stake) > 0)
-            voterStake.stake = uint128(int128(voterStake.stake) + voterStake.unappliedSlash);
-        else voterStake.stake = 0;
-        emit VoterSlashApplied(voter, voterStake.unappliedSlash, voterStake.stake);
-        voterStake.unappliedSlash = 0;
-    }
-
-    // Checks if the next round (index+1) is different to the current round (index).
-    function isNextRequestRoundDifferent(uint64 index) internal view returns (bool) {
-        if (index + 1 >= resolvedPriceRequestIds.length) return true;
-
-        return
-            priceRequests[resolvedPriceRequestIds[index]].lastVotingRound !=
-            priceRequests[resolvedPriceRequestIds[index + 1]].lastVotingRound;
+    function _computePendingStakes(
+        address voter,
+        uint128 amount
+    ) internal override {
+        // Silence unused parameter warnings
+        voter = voter;
+        amount = amount;
+        // No operation, as round-based pending stakes are not part of this system.
+        // Staker._incrementPendingStake is not called.
     }
 
     /****************************************
-     *      MIGRATION SUPPORT FUNCTIONS     *
+     *        SETTLEMENT LOGIC              *
      ****************************************/
 
     /**
-     * @notice Enable retrieval of rewards on a previously migrated away from voting contract. This function is intended
-     * on being removed from future versions of the Voting contract and aims to solve a short term migration pain point.
-     * @param voter voter for which rewards will be retrieved. Does not have to be the caller.
-     * @param roundId the round from which voting rewards will be retrieved from.
-     * @param toRetrieve array of PendingRequests which rewards are retrieved from.
-     * @return uint256 the amount of rewards.
+     * @dev Processes settled topics for a user, applying rewards or slashes.
+     * @param staker The address of the user.
+     * @param maxTraversals The maximum number of topics to process in this call.
      */
-    function retrieveRewardsOnMigratedVotingContract(
-        address voter,
-        uint256 roundId,
-        MinimumVotingAncillaryInterface.PendingRequestAncillary[] memory toRetrieve
-    ) external returns (uint256) {
-        uint256 rewards =
-            MinimumVotingAncillaryInterface(address(previousVotingContract))
-                .retrieveRewards(voter, roundId, toRetrieve)
-                .rawValue;
-        return rewards;
+    function _updateUserTopicResults(
+        address staker,
+        uint64 maxTraversals
+    ) internal {
+        uint256 topicsProcessed = 0;
+        bytes32[] storage participatedTopics = userParticipatedTopicIds[staker];
+
+        // Iterate backwards or manage an index to avoid issues if elements are removed/reordered (not the case here).
+        // For simplicity, iterating forwards. Consider a separate index for `nextTopicToProcessForUser` if many topics.
+        for (uint i = 0; i < participatedTopics.length; i++) {
+            if (topicsProcessed >= maxTraversals) {
+                break;
+            }
+
+            bytes32 topicId = participatedTopics[i];
+            TopicParticipation storage participation = userTopicParticipation[
+                topicId
+            ][staker];
+
+            // Check if topic is settled and not yet claimed by this user for this topic
+            if (
+                topicPhase[topicId] == TopicPhase.Settled &&
+                !participation.rewardClaimed
+            ) {
+                // --- 1. Get DPM Aggregated Results ---
+                // This is HYPOTHETICAL. DPM needs to expose this.
+                // Example: (int256 mean, int256 stdDev) =
+                //     OnitInfiniteOutcomeDPM(payable(topicsMarketAddress[topicId])).getAggregatedOutcome();
+                // For now, we'll use placeholder values.
+                bool wasInBand; // Placeholder for actual calculation
+
+                // --- 2. Calculate User's "Score" / In-Band Status ---
+                // This logic is complex and depends on how the DPM stores user positions
+                // and how "in-band" is defined.
+                // wasInBand = _calculateUserInBandStatus(topicId, staker, mean, stdDev); // Hypothetical
+
+                // Placeholder logic: Randomly decide for now for structure
+                // In a real scenario, this would be a deterministic calculation.
+                if (block.timestamp % 2 == 0) {
+                    // Replace with actual logic
+                    wasInBand = true;
+                } else {
+                    wasInBand = false;
+                }
+
+                // --- 3. Determine Reward/Slashing ---
+                uint256 userStakeForTopic = participation.totalStakeAmountABC;
+                VoterStake storage vs = voterStakes[staker]; // Staker's global stake struct
+
+                if (wasInBand) {
+                    // Placeholder: Reward is 10% of their stake on this topic.
+                    // Real reward logic is complex (pro-rata of slashed amounts).
+                    uint256 rewardAmount = (userStakeForTopic * 10) / 100;
+                    vs.outstandingRewards += SafeCast.toUint128(rewardAmount);
+                    emit UserTopicRewardApplied(topicId, staker, rewardAmount);
+                } else {
+                    // Placeholder: Slash is 5% of their stake on this topic.
+                    uint256 slashAmount = (userStakeForTopic * 5) / 100;
+                    if (slashAmount > 0) {
+                        if (SafeCast.toUint128(slashAmount) > vs.stake) {
+                            // Cannot slash more than they have globally.
+                            // This implies their stake on this topic was a significant portion of a now-reduced global stake.
+                            slashAmount = vs.stake;
+                        }
+
+                        if (slashAmount > 0) {
+                            // Re-check after potential cap
+                            vs.stake -= SafeCast.toUint128(slashAmount);
+                            // Also update cumulativeStake in the Staker contract
+                            cumulativeStake -= SafeCast.toUint128(slashAmount);
+                            emit UserTopicSlashApplied(
+                                topicId,
+                                staker,
+                                slashAmount
+                            );
+                        }
+                    }
+                }
+
+                participation.rewardClaimed = true;
+                topicsProcessed++;
+            }
+        }
+    }
+
+    // --- Placeholder for actual in-band calculation ---
+    // function _calculateUserInBandStatus(
+    //     bytes32 topicId,
+    //     address user,
+    //     int256 topicMean,
+    //     int256 topicStdDev
+    // ) internal view returns (bool) {
+    //     // 1. Get user's effective submission/position from the DPM for this topic.
+    //     //    This is a major missing piece as VotingV2 doesn't store this, DPM does.
+    //     //    DPM needs to expose `getUserPosition(topicId, user) -> (user_mean_vote, user_confidence_metric)`
+    //
+    //     // 2. Compare user's position with topicMean +/- topicStdDev.
+    //     // Example:
+    //     // int256 userEffectiveScore = IDPM(topicsMarketAddress[topicId]).getUserEffectiveScore(user);
+    //     // return (userEffectiveScore >= topicMean - topicStdDev && userEffectiveScore <= topicMean + topicStdDev);
+    //     return false; // Placeholder
+    // }
+
+    /****************************************
+     *            VIEW FUNCTIONS            *
+     ****************************************/
+
+    /**
+     * @notice Returns the remaining amount of ABC a user can additionally stake on a specific topic
+     *         before their total stake on that topic reaches their global stake limit.
+     * @param topicId The ID of the topic.
+     * @param user The address of the user.
+     * @return uint256 The available ABC amount that can still be staked on this topic by the user.
+     */
+    function getAvailableStakeForTopic(
+        bytes32 topicId,
+        address user
+    ) public view returns (uint256) {
+        uint256 globalStake = _getAvailableStake(user); // User's total global stake
+        uint256 currentStakeOnTopic = userTopicParticipation[topicId][user]
+            .totalStakeAmountABC;
+
+        if (globalStake <= currentStakeOnTopic) {
+            return 0; // Already staked up to or beyond global limit for this topic
+        }
+        return globalStake - currentStakeOnTopic;
     }
 
     /****************************************
      *    PRIVATE AND INTERNAL FUNCTIONS    *
      ****************************************/
 
-    // Deletes a request from the pending requests array, based on index. Swap and pop.
-    function _removeRequestFromPendingPriceRequestsIds(uint64 pendingRequestIndex) internal {
-        pendingPriceRequestsIds[pendingRequestIndex] = pendingPriceRequestsIds[pendingPriceRequestsIds.length - 1];
-        pendingPriceRequestsIds.pop();
-    }
-
-    // Returns the price for a given identifier. Three params are returns: bool if there was an error, int to represent
-    // the resolved price and a string which is filled with an error message, if there was an error or "".
-    // This method considers actual request status that might be ahead of the stored contract state that gets updated
-    // only after processResolvablePriceRequests() is called.
-    function _getPriceOrError(
-        bytes32 identifier,
-        uint256 time,
-        bytes memory ancillaryData
-    )
-        internal
-        view
-        returns (
-            bool,
-            int256,
-            string memory
-        )
-    {
-        PriceRequest storage priceRequest = _getPriceRequest(identifier, time, ancillaryData);
-        uint32 currentRoundId = getCurrentRoundId();
-        RequestStatus requestStatus = _getRequestStatus(priceRequest, currentRoundId);
-
-        if (requestStatus == RequestStatus.Active) return (false, 0, "Current voting round not ended");
-        if (requestStatus == RequestStatus.Resolved) {
-            VoteInstance storage voteInstance = priceRequest.voteInstances[priceRequest.lastVotingRound];
-            (, int256 resolvedPrice) = _getResolvedPrice(voteInstance, priceRequest.lastVotingRound);
-            return (true, resolvedPrice, "");
-        }
-
-        if (requestStatus == RequestStatus.Future) return (false, 0, "Price is still to be voted on");
-        if (requestStatus == RequestStatus.ToDelete) return (false, 0, "Price will be deleted");
-        (bool previouslyResolved, int256 previousPrice) =
-            _getPriceFromPreviousVotingContract(identifier, time, ancillaryData);
-        if (previouslyResolved) return (true, previousPrice, "");
-        return (false, 0, "Price was never requested");
-    }
-
-    // Check the previousVotingContract to see if a given price request was resolved.
-    // Returns true or false, and the resolved price or zero, depending on whether it was found or not.
-    function _getPriceFromPreviousVotingContract(
-        bytes32 identifier,
-        uint256 time,
-        bytes memory ancillaryData
-    ) private view returns (bool, int256) {
-        if (address(previousVotingContract) == address(0)) return (false, 0);
-        if (previousVotingContract.hasPrice(identifier, time, ancillaryData))
-            return (true, previousVotingContract.getPrice(identifier, time, ancillaryData));
-        return (false, 0);
-    }
-
-    // Returns a price request object for a given identifier, time and ancillary data.
-    function _getPriceRequest(
-        bytes32 identifier,
-        uint256 time,
-        bytes memory ancillaryData
-    ) private view returns (PriceRequest storage) {
-        return priceRequests[_encodePriceRequest(identifier, time, ancillaryData)];
-    }
-
-    // Returns an encoded bytes32 representing a price request. Used when storing/referencing price requests.
-    function _encodePriceRequest(
-        bytes32 identifier,
-        uint256 time,
-        bytes memory ancillaryData
-    ) private pure returns (bytes32) {
-        return keccak256(abi.encode(identifier, time, ancillaryData));
-    }
-
-    // Stores ("freezes") variables that should not shift within an active voting round. Called on reveal but only makes
-    // a state change if and only if the this is the first reveal.
-    function _freezeRoundVariables(uint256 roundId) private {
-        // Only freeze the round if this is the first request in the round.
-        if (rounds[roundId].minParticipationRequirement == 0) {
-            rounds[roundId].slashingLibrary = slashingLibrary;
-
-            // The minimum required participation for a vote to settle within this round is the GAT (fixed number).
-            rounds[roundId].minParticipationRequirement = gat;
-
-            // The minimum votes on the modal outcome for the vote to settle within this round is the SPAT (percentage).
-            rounds[roundId].minAgreementRequirement = uint128((spat * uint256(cumulativeStake)) / 1e18);
-            rounds[roundId].cumulativeStakeAtRound = cumulativeStake; // Store the cumulativeStake to work slashing.
-        }
-    }
-
-    // Traverse pending price requests and resolve any that are resolvable. If requests are rollable (they did not
-    // resolve in the previous round and are to be voted in a subsequent round) then roll them. If requests can be
-    // deleted (they have been rolled up to the maxRolls counter) then delete them. The caller can pass in maxTraversals
-    // to limit the number of requests that are resolved in a single call to bound the total gas used by this function.
-    // Note that the resolved index is stores for each round. This means that only the first caller of this function
-    // per round needs to traverse the pending requests. After that subsequent calls to this are a no-op for that round.
-    function _processResolvablePriceRequests(uint64 maxTraversals) private {
-        uint32 currentRoundId = getCurrentRoundId();
-
-        // Load in the last resolved index for this round to continue off from where the last caller left.
-        uint64 requestIndex = lastRoundIdProcessed == currentRoundId ? nextPendingIndexToProcess : 0;
-        // Traverse pendingPriceRequestsIds array and update the requests status according to the state of the request
-        //(i.e settle, roll or delete request). Bound iterations to the maxTraversals parameter to cap the gas used.
-        while (requestIndex < pendingPriceRequestsIds.length && maxTraversals > 0) {
-            maxTraversals = unsafe_dec_64(maxTraversals);
-            PriceRequest storage request = priceRequests[pendingPriceRequestsIds[requestIndex]];
-
-            // If the last voting round is greater than or equal to the current round then this request is currently
-            // being voted on or is enqueued for the next round. In this case, skip it and increment the request index.
-            if (request.lastVotingRound >= currentRoundId) {
-                requestIndex = unsafe_inc_64(requestIndex);
-                continue; // Continue to the next request.
-            }
-
-            // Else, we are dealing with a request that can either be: a) deleted, b) rolled or c) resolved.
-            VoteInstance storage voteInstance = request.voteInstances[request.lastVotingRound];
-            (bool isResolvable, int256 resolvedPrice) = _getResolvedPrice(voteInstance, request.lastVotingRound);
-
-            if (isResolvable) {
-                // If resolvable, resolve. This involves a) moving the requestId from pendingPriceRequestsIds array to
-                // resolvedPriceRequestIds array and b) removing requestId from pendingPriceRequestsIds. Don't need to
-                // increment requestIndex as from pendingPriceRequestsIds amounts to decreasing the while loop bound.
-                resolvedPriceRequestIds.push(pendingPriceRequestsIds[requestIndex]);
-                _removeRequestFromPendingPriceRequestsIds(requestIndex);
-                emit RequestResolved(
-                    request.lastVotingRound,
-                    resolvedPriceRequestIds.length - 1,
-                    request.identifier,
-                    request.time,
-                    request.ancillaryData,
-                    resolvedPrice
-                );
-                continue; // Continue to the next request.
-            }
-            // If not resolvable, but the round has passed its voting round, then it must be deleted or rolled. First,
-            // increment the rollCount. Use the difference between the current round and the last voting round to
-            // accommodate the contract not being touched for any number of rounds during the roll.
-            request.rollCount += currentRoundId - request.lastVotingRound;
-
-            // If the roll count exceeds the threshold and the request is not governance then it is deletable.
-            if (_shouldDeleteRequest(request.rollCount, request.isGovernance)) {
-                emit RequestDeleted(request.identifier, request.time, request.ancillaryData, request.rollCount);
-                delete priceRequests[pendingPriceRequestsIds[requestIndex]];
-                _removeRequestFromPendingPriceRequestsIds(requestIndex);
-                continue;
-            }
-            // Else, the request should be rolled. This involves only moving forward the lastVotingRound.
-            request.lastVotingRound = getRoundIdToVoteOnRequest(currentRoundId);
-            ++rounds[request.lastVotingRound].numberOfRequestsToVote;
-            emit RequestRolled(request.identifier, request.time, request.ancillaryData, request.rollCount);
-            requestIndex = unsafe_inc_64(requestIndex);
-        }
-
-        lastRoundIdProcessed = currentRoundId; // Store the roundId that was processed.
-        nextPendingIndexToProcess = requestIndex; // Store the index traversed up to for this round.
-    }
-
-    // Returns a price request status. A request is either: NotRequested, Active, Resolved, Future or ToDelete.
-    function _getRequestStatus(PriceRequest storage priceRequest, uint32 currentRoundId)
-        private
-        view
-        returns (RequestStatus)
-    {
-        if (priceRequest.lastVotingRound == 0) return RequestStatus.NotRequested;
-        if (priceRequest.lastVotingRound < currentRoundId) {
-            // Check if the request has already been resolved
-            VoteInstance storage voteInstance = priceRequest.voteInstances[priceRequest.lastVotingRound];
-            (bool isResolved, ) = _getResolvedPrice(voteInstance, priceRequest.lastVotingRound);
-            if (isResolved) return RequestStatus.Resolved;
-            if (_shouldDeleteRequest(_getActualRollCount(priceRequest, currentRoundId), priceRequest.isGovernance))
-                return RequestStatus.ToDelete;
-            return RequestStatus.Active;
-        }
-        if (priceRequest.lastVotingRound == currentRoundId) return RequestStatus.Active;
-
-        return RequestStatus.Future; // Means than priceRequest.lastVotingRound > currentRoundId
-    }
-
-    function _getResolvedPrice(VoteInstance storage voteInstance, uint256 lastVotingRound)
-        internal
-        view
-        returns (bool isResolved, int256 price)
-    {
-        return
-            voteInstance.results.getResolvedPrice(
-                rounds[lastVotingRound].minParticipationRequirement,
-                rounds[lastVotingRound].minAgreementRequirement
-            );
-    }
-
-    // Gas optimized uint256 increment.
-    function unsafe_inc(uint256 x) internal pure returns (uint256) {
-        unchecked { return x + 1; }
+    /**
+     * @notice Calculates the amount of stake a user has available for new commitments.
+     * @param user The address of the user.
+     * @return uint256 The amount of available stake.
+     */
+    function _getAvailableStake(address user) internal view returns (uint256) {
+        // voterStakes[user].stake is the user's total global stake in the Staker contract
+        uint256 globalStake = uint256(voterStakes[user].stake);
+        return globalStake;
     }
 
     // Gas optimized uint64 increment.
     function unsafe_inc_64(uint64 x) internal pure returns (uint64) {
-        unchecked { return x + 1; }
+        unchecked {
+            return x + 1;
+        }
     }
 
     // Gas optimized uint64 decrement.
     function unsafe_dec_64(uint64 x) internal pure returns (uint64) {
-        unchecked { return x - 1; }
-    }
-
-    // Returns the registered identifier whitelist, stored in the finder.
-    function _getIdentifierWhitelist() private view returns (IdentifierWhitelistInterface) {
-        return IdentifierWhitelistInterface(finder.getImplementationAddress(OracleInterfaces.IdentifierWhitelist));
-    }
-
-    // Reverts if the contract has been migrated. Used in a modifier, defined as a private function for gas savings.
-    function _requireNotMigrated() private view {
-        require(migratedAddress == address(0), "Contract migrated");
-    }
-
-    // Enforces that a calling contract is registered.
-    function _requireRegisteredContract() private view {
-        RegistryInterface registry = RegistryInterface(finder.getImplementationAddress(OracleInterfaces.Registry));
-        require(registry.isContractRegistered(msg.sender) || msg.sender == migratedAddress, "Caller not registered");
-    }
-
-    // Checks if a request should be deleted. A non-gevernance request should be deleted if it has been rolled more than
-    // the maxRolls.
-    function _shouldDeleteRequest(uint256 rollCount, bool isGovernance) private view returns (bool) {
-        return rollCount > maxRolls && !isGovernance;
-    }
-
-    // Returns the actual roll count of a request. This is the roll count plus the number of rounds that have passed
-    // since the last voting round.
-    function _getActualRollCount(PriceRequest storage priceRequest, uint32 currentRoundId)
-        private
-        view
-        returns (uint32)
-    {
-        if (currentRoundId <= priceRequest.lastVotingRound) return priceRequest.rollCount;
-        return priceRequest.rollCount + currentRoundId - priceRequest.lastVotingRound;
+        unchecked {
+            return x - 1;
+        }
     }
 }

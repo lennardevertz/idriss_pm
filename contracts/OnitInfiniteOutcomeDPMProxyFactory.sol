@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// TODO delete, all function added to VotingV2
 pragma solidity ^0.8.28;
 
 import {OnitInfiniteOutcomeDPM} from "./OnitInfiniteOutcomeDPM.sol";
