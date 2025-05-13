@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity 0.8.16;
+pragma solidity 0.8.28;
 
 /**
  * @title Computes vote results.
@@ -33,8 +33,10 @@ library ResultComputationV2 {
     ) internal {
         data.totalVotes += numberTokens;
         data.voteFrequency[votePrice] += numberTokens;
-        if (votePrice != data.currentMode && data.voteFrequency[votePrice] > data.voteFrequency[data.currentMode])
-            data.currentMode = votePrice;
+        if (
+            votePrice != data.currentMode &&
+            data.voteFrequency[votePrice] > data.voteFrequency[data.currentMode]
+        ) data.currentMode = votePrice;
     }
 
     /****************************************
@@ -57,7 +59,10 @@ library ResultComputationV2 {
         uint128 minTotalVotes,
         uint128 minModalVotes
     ) internal view returns (bool isResolved, int256 price) {
-        if (data.totalVotes > minTotalVotes && data.voteFrequency[data.currentMode] > minModalVotes) {
+        if (
+            data.totalVotes > minTotalVotes &&
+            data.voteFrequency[data.currentMode] > minModalVotes
+        ) {
             isResolved = true; // minTotalVotes and minModalVotes are exceeded, so the resolved price is the mode.
             price = data.currentMode;
         }
@@ -70,7 +75,10 @@ library ResultComputationV2 {
      * @param voteHash committed hash submitted by the voter.
      * @return bool true if the vote was correct.
      */
-    function wasVoteCorrect(Data storage data, bytes32 voteHash) internal view returns (bool) {
+    function wasVoteCorrect(
+        Data storage data,
+        bytes32 voteHash
+    ) internal view returns (bool) {
         return voteHash == keccak256(abi.encode(data.currentMode));
     }
 
@@ -80,7 +88,9 @@ library ResultComputationV2 {
      * @param data contains all votes against which the correctly voted tokens are counted.
      * @return uint128 which indicates the frequency of the correctly voted tokens.
      */
-    function getTotalCorrectlyVotedTokens(Data storage data) internal view returns (uint128) {
+    function getTotalCorrectlyVotedTokens(
+        Data storage data
+    ) internal view returns (uint128) {
         return data.voteFrequency[data.currentMode];
     }
 }

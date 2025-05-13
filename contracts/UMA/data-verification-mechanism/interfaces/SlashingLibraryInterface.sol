@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity 0.8.16;
+pragma solidity 0.8.28;
 
 interface SlashingLibraryInterface {
     /**
@@ -63,5 +63,8 @@ interface SlashingLibraryInterface {
         uint256 totalCorrectVotes,
         uint256 priceRequestIndex,
         bool isGovernance
-    ) external view returns (uint256 wrongVoteSlashPerToken, uint256 noVoteSlashPerToken);
+    )
+        external
+        view
+        returns (uint256 wrongVoteSlashPerToken, uint256 noVoteSlashPerToken);
 }
