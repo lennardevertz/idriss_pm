@@ -1,10 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.0;
 
+import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+import "@openzeppelin/contracts/utils/math/SignedSafeMath.sol";
+
 /**
  * @title Library for fixed point arithmetic on uints
  */
 library FixedPoint {
+    using SafeMath for uint256;
+    using SignedSafeMath for int256;
+
     // Supports 18 decimals. E.g., 1e18 represents "1", 5e17 represents "0.5".
     // For unsigned values:
     //   This can represent a value up to (2^256 - 1)/10^18 = ~10^59. 10^59 will be stored internally as uint256 10^77.
@@ -23,7 +29,7 @@ library FixedPoint {
     function fromUnscaledUint(
         uint256 a
     ) internal pure returns (Unsigned memory) {
-        return Unsigned(a * FP_SCALING_FACTOR);
+        return Unsigned(a.mul(FP_SCALING_FACTOR));
     }
 
     /**
@@ -244,7 +250,7 @@ library FixedPoint {
         Unsigned memory a,
         Unsigned memory b
     ) internal pure returns (Unsigned memory) {
-        return Unsigned(a.rawValue + b.rawValue);
+        return Unsigned(a.rawValue.add(b.rawValue));
     }
 
     /**
@@ -270,7 +276,7 @@ library FixedPoint {
         Unsigned memory a,
         Unsigned memory b
     ) internal pure returns (Unsigned memory) {
-        return Unsigned(a.rawValue - b.rawValue);
+        return Unsigned(a.rawValue.sub(b.rawValue));
     }
 
     /**
@@ -316,7 +322,7 @@ library FixedPoint {
         // 2. Results that can't be represented exactly are truncated not rounded. E.g., 1.4 * 2e-18 = 2.8e-18, which
         // would round to 3, but this computation produces the result 2.
         // No need to use SafeMath because FP_SCALING_FACTOR != 0.
-        return Unsigned((a.rawValue * b.rawValue) / FP_SCALING_FACTOR);
+        return Unsigned(a.rawValue.mul(b.rawValue) / FP_SCALING_FACTOR);
     }
 
     /**
@@ -330,7 +336,7 @@ library FixedPoint {
         Unsigned memory a,
         uint256 b
     ) internal pure returns (Unsigned memory) {
-        return Unsigned(a.rawValue * b);
+        return Unsigned(a.rawValue.mul(b));
     }
 
     /**
@@ -343,11 +349,11 @@ library FixedPoint {
         Unsigned memory a,
         Unsigned memory b
     ) internal pure returns (Unsigned memory) {
-        uint256 mulRaw = a.rawValue * b.rawValue;
+        uint256 mulRaw = a.rawValue.mul(b.rawValue);
         uint256 mulFloor = mulRaw / FP_SCALING_FACTOR;
-        uint256 mod = mulRaw % FP_SCALING_FACTOR;
+        uint256 mod = mulRaw.mod(FP_SCALING_FACTOR);
         if (mod != 0) {
-            return Unsigned(mulFloor + 1);
+            return Unsigned(mulFloor.add(1));
         } else {
             return Unsigned(mulFloor);
         }
@@ -364,7 +370,7 @@ library FixedPoint {
         uint256 b
     ) internal pure returns (Unsigned memory) {
         // Since b is an uint, there is no risk of truncation and we can just mul it normally
-        return Unsigned(a.rawValue * b);
+        return Unsigned(a.rawValue.mul(b));
     }
 
     /**
@@ -383,7 +389,7 @@ library FixedPoint {
         // 10^41 is stored internally as a uint256 10^59.
         // 2. Results that can't be represented exactly are truncated not rounded. E.g., 2 / 3 = 0.6 repeating, which
         // would round to 0.666666666666666667, but this computation produces the result 0.666666666666666666.
-        return Unsigned((a.rawValue * FP_SCALING_FACTOR) / b.rawValue);
+        return Unsigned(a.rawValue.mul(FP_SCALING_FACTOR).div(b.rawValue));
     }
 
     /**
@@ -397,7 +403,7 @@ library FixedPoint {
         Unsigned memory a,
         uint256 b
     ) internal pure returns (Unsigned memory) {
-        return Unsigned(a.rawValue / b);
+        return Unsigned(a.rawValue.div(b));
     }
 
     /**
@@ -424,11 +430,11 @@ library FixedPoint {
         Unsigned memory a,
         Unsigned memory b
     ) internal pure returns (Unsigned memory) {
-        uint256 aScaled = a.rawValue * FP_SCALING_FACTOR;
-        uint256 divFloor = aScaled / b.rawValue;
-        uint256 mod = aScaled % b.rawValue;
+        uint256 aScaled = a.rawValue.mul(FP_SCALING_FACTOR);
+        uint256 divFloor = aScaled.div(b.rawValue);
+        uint256 mod = aScaled.mod(b.rawValue);
         if (mod != 0) {
-            return Unsigned(divFloor + 1);
+            return Unsigned(divFloor.add(1));
         } else {
             return Unsigned(divFloor);
         }
@@ -462,7 +468,7 @@ library FixedPoint {
         uint256 b
     ) internal pure returns (Unsigned memory output) {
         output = fromUnscaledUint(1);
-        for (uint256 i = 0; i < b; i = i + 1) {
+        for (uint256 i = 0; i < b; i = i.add(1)) {
             output = mul(output, a);
         }
     }
@@ -497,7 +503,7 @@ library FixedPoint {
      * @return the converted FixedPoint.Signed.
      */
     function fromUnscaledInt(int256 a) internal pure returns (Signed memory) {
-        return Signed(a * SFP_SCALING_FACTOR);
+        return Signed(a.mul(SFP_SCALING_FACTOR));
     }
 
     /**
@@ -715,7 +721,7 @@ library FixedPoint {
         Signed memory a,
         Signed memory b
     ) internal pure returns (Signed memory) {
-        return Signed(a.rawValue + b.rawValue);
+        return Signed(a.rawValue.add(b.rawValue));
     }
 
     /**
@@ -741,7 +747,7 @@ library FixedPoint {
         Signed memory a,
         Signed memory b
     ) internal pure returns (Signed memory) {
-        return Signed(a.rawValue - b.rawValue);
+        return Signed(a.rawValue.sub(b.rawValue));
     }
 
     /**
@@ -787,7 +793,7 @@ library FixedPoint {
         // 2. Results that can't be represented exactly are truncated not rounded. E.g., 1.4 * 2e-18 = 2.8e-18, which
         // would round to 3, but this computation produces the result 2.
         // No need to use SafeMath because SFP_SCALING_FACTOR != 0.
-        return Signed((a.rawValue * b.rawValue) / SFP_SCALING_FACTOR);
+        return Signed(a.rawValue.mul(b.rawValue) / SFP_SCALING_FACTOR);
     }
 
     /**
@@ -801,7 +807,7 @@ library FixedPoint {
         Signed memory a,
         int256 b
     ) internal pure returns (Signed memory) {
-        return Signed(a.rawValue * b);
+        return Signed(a.rawValue.mul(b));
     }
 
     /**
@@ -814,14 +820,14 @@ library FixedPoint {
         Signed memory a,
         Signed memory b
     ) internal pure returns (Signed memory) {
-        int256 mulRaw = a.rawValue * b.rawValue;
+        int256 mulRaw = a.rawValue.mul(b.rawValue);
         int256 mulTowardsZero = mulRaw / SFP_SCALING_FACTOR;
         // Manual mod because SignedSafeMath doesn't support it.
         int256 mod = mulRaw % SFP_SCALING_FACTOR;
         if (mod != 0) {
             bool isResultPositive = isLessThan(a, 0) == isLessThan(b, 0);
             int256 valueToAdd = isResultPositive ? int256(1) : int256(-1);
-            return Signed(mulTowardsZero + valueToAdd);
+            return Signed(mulTowardsZero.add(valueToAdd));
         } else {
             return Signed(mulTowardsZero);
         }
@@ -838,7 +844,7 @@ library FixedPoint {
         int256 b
     ) internal pure returns (Signed memory) {
         // Since b is an int, there is no risk of truncation and we can just mul it normally
-        return Signed(a.rawValue * b);
+        return Signed(a.rawValue.mul(b));
     }
 
     /**
@@ -857,7 +863,7 @@ library FixedPoint {
         // 10^41 is stored internally as an int256 10^59.
         // 2. Results that can't be represented exactly are truncated not rounded. E.g., 2 / 3 = 0.6 repeating, which
         // would round to 0.666666666666666667, but this computation produces the result 0.666666666666666666.
-        return Signed((a.rawValue * SFP_SCALING_FACTOR) / b.rawValue);
+        return Signed(a.rawValue.mul(SFP_SCALING_FACTOR).div(b.rawValue));
     }
 
     /**
@@ -871,7 +877,7 @@ library FixedPoint {
         Signed memory a,
         int256 b
     ) internal pure returns (Signed memory) {
-        return Signed(a.rawValue / b);
+        return Signed(a.rawValue.div(b));
     }
 
     /**
@@ -898,14 +904,14 @@ library FixedPoint {
         Signed memory a,
         Signed memory b
     ) internal pure returns (Signed memory) {
-        int256 aScaled = a.rawValue * SFP_SCALING_FACTOR;
-        int256 divTowardsZero = aScaled / b.rawValue;
+        int256 aScaled = a.rawValue.mul(SFP_SCALING_FACTOR);
+        int256 divTowardsZero = aScaled.div(b.rawValue);
         // Manual mod because SignedSafeMath doesn't support it.
         int256 mod = aScaled % b.rawValue;
         if (mod != 0) {
             bool isResultPositive = isLessThan(a, 0) == isLessThan(b, 0);
             int256 valueToAdd = isResultPositive ? int256(1) : int256(-1);
-            return Signed(divTowardsZero + valueToAdd);
+            return Signed(divTowardsZero.add(valueToAdd));
         } else {
             return Signed(divTowardsZero);
         }
@@ -939,7 +945,7 @@ library FixedPoint {
         uint256 b
     ) internal pure returns (Signed memory output) {
         output = fromUnscaledInt(1);
-        for (uint256 i = 0; i < b; i = i + 1) {
+        for (uint256 i = 0; i < b; i = i.add(1)) {
             output = mul(output, a);
         }
     }

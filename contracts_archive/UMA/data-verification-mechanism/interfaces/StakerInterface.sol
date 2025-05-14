@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity 0.8.28;
+pragma solidity 0.8.16;
 
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "../implementation/VotingToken.sol";
+import "../../common/interfaces/ExpandedIERC20.sol";
 
 interface StakerInterface {
-    function votingToken() external returns (IERC20);
+    function votingToken() external returns (ExpandedIERC20);
 
     function stake(uint128 amount) external;
 

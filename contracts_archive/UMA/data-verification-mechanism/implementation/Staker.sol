@@ -4,7 +4,7 @@ pragma solidity ^0.8.0;
 import "../../common/implementation/Lockable.sol";
 import "../../common/implementation/MultiCaller.sol";
 
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "../../common/interfaces/ExpandedIERC20.sol";
 import "../interfaces/StakerInterface.sol";
 
 import "@openzeppelin/contracts/access/Ownable.sol";
@@ -46,9 +46,7 @@ abstract contract Staker is StakerInterface, Ownable, Lockable, MultiCaller {
 
     uint64 public lastUpdateTime; // Tracks the last time the reward rate was updated, used in reward allocation.
 
-    IERC20 public immutable votingToken; // An instance of the standard ERC20 voting token
-
-    address public multisigRewardHolder; // Address holding the reward tokens, must approve this contract
+    ExpandedIERC20 public immutable votingToken; // An instance of the UMA voting token to mint rewards for stakers
 
     /****************************************
      *                EVENTS                *
@@ -96,8 +94,6 @@ abstract contract Staker is StakerInterface, Ownable, Lockable, MultiCaller {
 
     event DelegatorSet(address indexed delegate, address indexed delegator);
 
-    event MultisigRewardHolderSet(address indexed newHolder);
-
     /**
      * @notice Construct the Staker contract
      * @param _emissionRate amount of voting tokens that are emitted per second, split pro rata to stakers.
@@ -111,7 +107,7 @@ abstract contract Staker is StakerInterface, Ownable, Lockable, MultiCaller {
     ) {
         setEmissionRate(_emissionRate);
         setUnstakeCoolDown(_unstakeCoolDown);
-        votingToken = IERC20(_votingToken);
+        votingToken = ExpandedIERC20(_votingToken);
     }
 
     /****************************************
@@ -242,28 +238,19 @@ abstract contract Staker is StakerInterface, Ownable, Lockable, MultiCaller {
         address voter,
         address recipient
     ) internal returns (uint128) {
-        _updateTrackers(voter); // Ensure outstandingRewards is current
+        _updateTrackers(voter);
         VoterStake storage voterStake = voterStakes[voter];
 
-        uint128 tokensToTransfer = voterStake.outstandingRewards;
-        if (tokensToTransfer > 0) {
-            require(
-                multisigRewardHolder != address(0),
-                "Reward holder not set"
-            );
+        uint128 tokensToMint = voterStake.outstandingRewards;
+        if (tokensToMint > 0) {
             voterStake.outstandingRewards = 0;
-            // Pull tokens from the multisig to the recipient
             require(
-                votingToken.transferFrom(
-                    multisigRewardHolder,
-                    recipient,
-                    tokensToTransfer
-                ),
-                "Reward token transferFrom failed"
+                votingToken.mint(recipient, tokensToMint),
+                "Voting token issuance failed"
             );
-            emit WithdrawnRewards(voter, msg.sender, tokensToTransfer); // msg.sender is the original caller
+            emit WithdrawnRewards(voter, msg.sender, tokensToMint);
         }
-        return tokensToTransfer;
+        return tokensToMint;
     }
 
     /**
@@ -322,17 +309,6 @@ abstract contract Staker is StakerInterface, Ownable, Lockable, MultiCaller {
     function setUnstakeCoolDown(uint64 newUnstakeCoolDown) public onlyOwner {
         unstakeCoolDown = newUnstakeCoolDown;
         emit SetNewUnstakeCoolDown(newUnstakeCoolDown);
-    }
-
-    /**
-     * @notice Sets the address of the multisig wallet that holds reward tokens.
-     * @dev Only callable by the owner. The multisig must approve this contract to spend tokens.
-     * @param _newHolder The address of the multisig reward holder.
-     */
-    function setMultisigRewardHolder(address _newHolder) external onlyOwner {
-        require(_newHolder != address(0), "Holder cannot be zero address");
-        multisigRewardHolder = _newHolder;
-        emit MultisigRewardHolderSet(_newHolder);
     }
 
     // Updates an account internal trackers.
