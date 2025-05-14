@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity 0.8.16;
+pragma solidity 0.8.28;
 
 import {Ownable} from "solady/src/auth/Ownable.sol"; // Staker likely inherits Ownable
 import {LibClone} from "solady/src/utils/LibClone.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
-import "./Staker.sol"; // Assuming Staker.sol is in the same directory
+import {Staker} from "./Staker.sol"; // Assuming Staker.sol is in the same directory
 import {OnitInfiniteOutcomeDPM, MarketConfig, MarketInitData} from "../../../OnitInfiniteOutcomeDPM.sol"; // Adjusted path
 
 /**
@@ -551,9 +551,14 @@ contract VotingV2 is Staker {
             // The current DPM's `resolvedAtTimestamp` is set by `resolveMarket`.
             // We need an equivalent for confidence aggregation.
             // Let's assume a hypothetical `aggregationFinalizedTimestamp` on the DPM.
-            uint256 dpmFinalizedTime = OnitInfiniteOutcomeDPM(payable(marketAddress)).resolvedAtTimestamp(); // Using existing field as placeholder
+            uint256 dpmFinalizedTime = OnitInfiniteOutcomeDPM(
+                payable(marketAddress)
+            ).resolvedAtTimestamp(); // Using existing field as placeholder
 
-            if (dpmFinalizedTime > 0 && dpmFinalizedTime >= config.bettingCutoff) { // Ensure it was finalized after betting
+            if (
+                dpmFinalizedTime > 0 && dpmFinalizedTime >= config.bettingCutoff
+            ) {
+                // Ensure it was finalized after betting
                 dpmAggregationComplete = true; // Placeholder logic
             }
 
