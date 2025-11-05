@@ -30,8 +30,12 @@ library VoteTiming {
      * @param currentTime input unix timestamp used to compute the current roundId.
      * @return roundId defined as a function of the currentTime and `phaseLength` from `data`.
      */
-    function computeCurrentRoundId(Data storage data, uint256 currentTime) internal view returns (uint256) {
-        uint256 roundLength = data.phaseLength * uint256(VotingAncillaryInterface.Phase.NUM_PHASES);
+    function computeCurrentRoundId(
+        Data storage data,
+        uint256 currentTime
+    ) internal view returns (uint256) {
+        uint256 roundLength = data.phaseLength *
+            uint256(VotingAncillaryInterface.Phase.NUM_PHASES);
         return currentTime / roundLength;
     }
 
@@ -41,8 +45,12 @@ library VoteTiming {
      * @param roundId uniquely identifies the current round.
      * @return timestamp unix time of when the current round will end.
      */
-    function computeRoundEndTime(Data storage data, uint256 roundId) internal view returns (uint256) {
-        uint256 roundLength = data.phaseLength * uint256(VotingAncillaryInterface.Phase.NUM_PHASES);
+    function computeRoundEndTime(
+        Data storage data,
+        uint256 roundId
+    ) internal view returns (uint256) {
+        uint256 roundLength = data.phaseLength *
+            uint256(VotingAncillaryInterface.Phase.NUM_PHASES);
         return roundLength * (roundId + 1);
     }
 
@@ -52,15 +60,15 @@ library VoteTiming {
      * @param currentTime input unix timestamp used to compute the current roundId.
      * @return current voting phase based on current time and vote phases configuration.
      */
-    function computeCurrentPhase(Data storage data, uint256 currentTime)
-        internal
-        view
-        returns (VotingAncillaryInterface.Phase)
-    {
+    function computeCurrentPhase(
+        Data storage data,
+        uint256 currentTime
+    ) internal view returns (VotingAncillaryInterface.Phase) {
         // This employs some hacky casting. We could make this an if-statement if we're worried about type safety.
         return
             VotingAncillaryInterface.Phase(
-                (currentTime / data.phaseLength) % uint256(VotingAncillaryInterface.Phase.NUM_PHASES)
+                (currentTime / data.phaseLength) %
+                    uint256(VotingAncillaryInterface.Phase.NUM_PHASES)
             );
     }
 }

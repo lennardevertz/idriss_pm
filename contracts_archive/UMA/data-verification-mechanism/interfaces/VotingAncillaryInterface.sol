@@ -1,50 +1,16 @@
-// TODO: add staking/snapshot interfaces to this interface file.
-
 // SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity 0.8.16;
+pragma solidity ^0.8.0;
+
+import "../../common/implementation/FixedPoint.sol";
 
 /**
  * @title Interface that voters must use to Vote on price request resolutions.
  */
-abstract contract VotingV2Interface {
-    struct PendingRequest {
-        bytes32 identifier;
-        uint256 time;
-    }
-
+abstract contract VotingAncillaryInterface {
     struct PendingRequestAncillary {
         bytes32 identifier;
         uint256 time;
         bytes ancillaryData;
-    }
-
-    struct PendingRequestAncillaryAugmented {
-        uint32 lastVotingRound;
-        bool isGovernance;
-        uint64 time;
-        uint32 rollCount;
-        bytes32 identifier;
-        bytes ancillaryData;
-    }
-
-    // Captures the necessary data for making a commitment.
-    // Used as a parameter when making batch commitments.
-    // Not used as a data structure for storage.
-    struct Commitment {
-        bytes32 identifier;
-        uint256 time;
-        bytes32 hash;
-        bytes encryptedVote;
-    }
-
-    // Captures the necessary data for revealing a vote.
-    // Used as a parameter when making batch reveals.
-    // Not used as a data structure for storage.
-    struct Reveal {
-        bytes32 identifier;
-        uint256 time;
-        int256 price;
-        int256 salt;
     }
 
     // Captures the necessary data for making a commitment.
@@ -71,7 +37,11 @@ abstract contract VotingV2Interface {
 
     // Note: the phases must be in order. Meaning the first enum value must be the first phase, etc.
     // `NUM_PHASES` is to get the number of phases. It isn't an actual phase, and it should always be last.
-    enum Phase { Commit, Reveal, NUM_PHASES }
+    enum Phase {
+        Commit,
+        Reveal,
+        NUM_PHASES
+    }
 
     /**
      * @notice Commit a vote for a price request for `identifier` at `time`.
@@ -80,9 +50,8 @@ abstract contract VotingV2Interface {
      * @dev Since transaction data is public, the salt will be revealed with the vote. While this is the system’s expected behavior,
      * voters should never reuse salts. If someone else is able to guess the voted price and knows that a salt will be reused, then
      * they can determine the vote pre-reveal.
-     * @param identifier uniquely identifies the committed vote. EG BTC/USD price pair.
+     * @param identifier uniquely identifies the committed vote. E.G. BTC/USD price pair.
      * @param time unix timestamp of the price being voted on.
-     * @param ancillaryData arbitrary data appended to a price request to give the voters more info from the caller.
      * @param hash keccak256 hash of the `price`, `salt`, voter `address`, `time`, current `roundId`, and `identifier`.
      */
     function commitVote(
@@ -93,12 +62,20 @@ abstract contract VotingV2Interface {
     ) public virtual;
 
     /**
+     * @notice Submit a batch of commits in a single transaction.
+     * @dev Using `encryptedVote` is optional. If included then commitment is stored on chain.
+     * Look at `project-root/common/Constants.js` for the tested maximum number of
+     * commitments that can fit in one transaction.
+     * @param commits array of structs that encapsulate an `identifier`, `time`, `hash` and optional `encryptedVote`.
+     */
+    function batchCommit(CommitmentAncillary[] memory commits) public virtual;
+
+    /**
      * @notice commits a vote and logs an event with a data blob, typically an encrypted version of the vote
      * @dev An encrypted version of the vote is emitted in an event `EncryptedVote` to allow off-chain infrastructure to
      * retrieve the commit. The contents of `encryptedVote` are never used on chain: it is purely for convenience.
-     * @param identifier unique price pair identifier. Eg: BTC/USD price pair.
+     * @param identifier unique price pair identifier. E.g. BTC/USD price pair.
      * @param time unix timestamp of for the price request.
-     * @param ancillaryData  arbitrary data appended to a price request to give the voters more info from the caller.
      * @param hash keccak256 hash of the price you want to vote for and a `int256 salt`.
      * @param encryptedVote offchain encrypted blob containing the voters amount, time and salt.
      */
@@ -108,7 +85,16 @@ abstract contract VotingV2Interface {
         bytes memory ancillaryData,
         bytes32 hash,
         bytes memory encryptedVote
-    ) external virtual;
+    ) public virtual;
+
+    /**
+     * @notice snapshot the current round's token balances and lock in the inflation rate and GAT.
+     * @dev This function can be called multiple times but each round will only every have one snapshot at the
+     * time of calling `_freezeRoundVariables`.
+     * @param signature  signature required to prove caller is an EOA to prevent flash loans from being included in the
+     * snapshot.
+     */
+    function snapshotCurrentRound(bytes calldata signature) external virtual;
 
     /**
      * @notice Reveal a previously committed vote for `identifier` at `time`.
@@ -117,7 +103,6 @@ abstract contract VotingV2Interface {
      * @param identifier voted on in the commit phase. EG BTC/USD price pair.
      * @param time specifies the unix timestamp of the price is being voted on.
      * @param price voted on during the commit phase.
-     * @param ancillaryData arbitrary data appended to a price request to give the voters more info from the caller.
      * @param salt value used to hide the commitment price during the commit phase.
      */
     function revealVote(
@@ -129,10 +114,24 @@ abstract contract VotingV2Interface {
     ) public virtual;
 
     /**
-     * @notice Gets the requests that are being voted on this round.
-     * @return pendingRequests array containing identifiers of type PendingRequestAncillaryAugmented.
+     * @notice Reveal multiple votes in a single transaction.
+     * Look at `project-root/common/Constants.js` for the tested maximum number of reveals.
+     * that can fit in one transaction.
+     * @dev For more information on reveals, review the comment for `revealVote`.
+     * @param reveals array of the Reveal struct which contains an identifier, time, price and salt.
      */
-    function getPendingRequests() external virtual returns (PendingRequestAncillaryAugmented[] memory);
+    function batchReveal(RevealAncillary[] memory reveals) public virtual;
+
+    /**
+     * @notice Gets the queries that are being voted on this round.
+     * @return pendingRequests `PendingRequest` array containing identifiers
+     * and timestamps for all pending requests.
+     */
+    function getPendingRequests()
+        external
+        view
+        virtual
+        returns (PendingRequestAncillary[] memory);
 
     /**
      * @notice Returns the current voting phase, as a function of the current time.
@@ -144,7 +143,22 @@ abstract contract VotingV2Interface {
      * @notice Returns the current round ID, as a function of the current time.
      * @return uint256 representing the unique round ID.
      */
-    function getCurrentRoundId() external view virtual returns (uint32);
+    function getCurrentRoundId() external view virtual returns (uint256);
+
+    /**
+     * @notice Retrieves rewards owed for a set of resolved price requests.
+     * @dev Can only retrieve rewards if calling for a valid round and if the
+     * call is done within the timeout threshold (not expired).
+     * @param voterAddress voter for which rewards will be retrieved. Does not have to be the caller.
+     * @param roundId the round from which voting rewards will be retrieved from.
+     * @param toRetrieve array of PendingRequests which rewards are retrieved from.
+     * @return total amount of rewards returned to the voter.
+     */
+    function retrieveRewards(
+        address voterAddress,
+        uint256 roundId,
+        PendingRequestAncillary[] memory toRetrieve
+    ) public virtual returns (FixedPoint.Unsigned memory);
 
     // Voting Owner functions.
 
@@ -156,33 +170,29 @@ abstract contract VotingV2Interface {
     function setMigrated(address newVotingAddress) external virtual;
 
     /**
-     * @notice Sets the maximum number of rounds to roll a request can have before the DVM auto deletes it.
-     * @dev Can only be called by the contract owner.
-     * @param newMaxRolls the new number of rounds to roll a request before the DVM auto deletes it.
+     * @notice Resets the inflation rate. Note: this change only applies to rounds that have not yet begun.
+     * @dev This method is public because calldata structs are not currently supported by solidity.
+     * @param newInflationRate sets the next round's inflation rate.
      */
-    function setMaxRolls(uint32 newMaxRolls) external virtual;
+    function setInflationRate(
+        FixedPoint.Unsigned memory newInflationRate
+    ) public virtual;
 
     /**
-     * @notice Sets the maximum number of requests that can be made in a single round. Used to bound the maximum
-     * sequential slashing that can be applied within a single round.
-     * @dev Can only be called by the contract owner.
-     * @param newMaxRequestsPerRound the new maximum number of requests that can be made in a single round.
+     * @notice Resets the Gat percentage. Note: this change only applies to rounds that have not yet begun.
+     * @dev This method is public because calldata structs are not currently supported by solidity.
+     * @param newGatPercentage sets the next round's Gat percentage.
      */
-    function setMaxRequestPerRound(uint32 newMaxRequestsPerRound) external virtual;
+    function setGatPercentage(
+        FixedPoint.Unsigned memory newGatPercentage
+    ) public virtual;
 
     /**
-     * @notice Resets the GAT number and SPAT percentage. The GAT is the minimum number of tokens that must participate
-     * in a vote for it to resolve (quorum number). The SPAT is is the minimum percentage of tokens that must agree
-     * in a vote for it to resolve (percentage of staked tokens) Note: this change only applies to rounds that
-     * have not yet begun.
-     * @param newGat sets the next round's GAT and going forward.
-     * @param newSpat sets the next round's SPAT and going forward.
+     * @notice Resets the rewards expiration timeout.
+     * @dev This change only applies to rounds that have not yet begun.
+     * @param NewRewardsExpirationTimeout how long a caller can wait before choosing to withdraw their rewards.
      */
-    function setGatAndSpat(uint128 newGat, uint64 newSpat) external virtual;
-
-    /**
-     * @notice Changes the slashing library used by this contract.
-     * @param _newSlashingLibrary new slashing library address.
-     */
-    function setSlashingLibrary(address _newSlashingLibrary) external virtual;
+    function setRewardsExpirationTimeout(
+        uint256 NewRewardsExpirationTimeout
+    ) public virtual;
 }

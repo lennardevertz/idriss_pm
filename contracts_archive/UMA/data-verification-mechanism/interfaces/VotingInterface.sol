@@ -124,7 +124,11 @@ abstract contract VotingInterface {
      * @notice Returns the current voting phase, as a function of the current time.
      * @return Phase to indicate the current phase. Either { Commit, Reveal, NUM_PHASES }.
      */
-    function getVotePhase() external view virtual returns (VotingAncillaryInterface.Phase);
+    function getVotePhase()
+        external
+        view
+        virtual
+        returns (VotingAncillaryInterface.Phase);
 
     /**
      * @notice Returns the current round ID, as a function of the current time.
@@ -161,19 +165,25 @@ abstract contract VotingInterface {
      * @dev This method is public because calldata structs are not currently supported by solidity.
      * @param newInflationRate sets the next round's inflation rate.
      */
-    function setInflationRate(FixedPoint.Unsigned memory newInflationRate) public virtual;
+    function setInflationRate(
+        FixedPoint.Unsigned memory newInflationRate
+    ) public virtual;
 
     /**
      * @notice Resets the Gat percentage. Note: this change only applies to rounds that have not yet begun.
      * @dev This method is public because calldata structs are not currently supported by solidity.
      * @param newGatPercentage sets the next round's Gat percentage.
      */
-    function setGatPercentage(FixedPoint.Unsigned memory newGatPercentage) public virtual;
+    function setGatPercentage(
+        FixedPoint.Unsigned memory newGatPercentage
+    ) public virtual;
 
     /**
      * @notice Resets the rewards expiration timeout.
      * @dev This change only applies to rounds that have not yet begun.
      * @param NewRewardsExpirationTimeout how long a caller can wait before choosing to withdraw their rewards.
      */
-    function setRewardsExpirationTimeout(uint256 NewRewardsExpirationTimeout) public virtual;
+    function setRewardsExpirationTimeout(
+        uint256 NewRewardsExpirationTimeout
+    ) public virtual;
 }
